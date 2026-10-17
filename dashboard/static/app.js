@@ -5,7 +5,7 @@ function dash() {
     proc: {}, cfg: { editable: {}, display: {}, mode: '' }, state: { available: false },
     positions: [], unrealized: 0, stats: {}, statsMode: 'auto', trades: [], tradesTotal: 0,
     decisions: [], showNoise: false, logLines: [], logFollow: true, logFilter: '',
-    form: {}, modal: { open: false }, toasts: [], chart: null,
+    form: {}, modal: { open: false }, toasts: [], chart: null, now: Date.now() / 1000,
     setup: { needs_setup: false, starter: {} }, needsSetup: false, setupSkipped: localStorage.getItem('setupSkipped') === '1',
     setupForm: { private_key: '', wallet_address: '', showKey: false, mode: 'paper', live_confirmation: '', live_ack: false, settings: {} },
     wallet: { replacing: false, key: '', addr: '', show: false },
@@ -18,6 +18,7 @@ function dash() {
       this.refreshAll();
       setInterval(() => this.refreshFast(), 4000);
       setInterval(() => this.refreshSlow(), 8000);
+      setInterval(() => { this.now = Date.now() / 1000; }, 1000);
     },
     // ---------- data ----------
     async api(path, opts = {}) {
@@ -180,23 +181,69 @@ function dash() {
       const el = document.getElementById('pnlChart'); if (!el || !window.Chart) return;
       const pts = (this.stats.series || []).map(p => ({ x: p.t * 1000, y: p.pnl, trade: p.trade, slug: p.slug, reason: p.reason }));
       const last = pts.length ? pts[pts.length - 1].y : 0;
-      const color = last >= 0 ? '16,185,129' : '244,63,94';
+      const color = last >= 0 ? '46,242,164' : '255,77,125';
       if (this.chart) { const ds = this.chart.data.datasets[0]; ds.data = pts; ds.borderColor = `rgb(${color})`; ds._rgb = color; this.chart.update('none'); return; }
+      const glow = { id: 'glow', beforeDatasetDraw(c) { const x = c.ctx; x.save(); x.shadowColor = `rgba(${c.data.datasets[0]._rgb},.55)`; x.shadowBlur = 14; x.shadowOffsetY = 4; },
+        afterDatasetDraw(c) { c.ctx.restore(); } };
+      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       const ctx = el.getContext('2d');
       this.chart = new Chart(ctx, {
-        type: 'line',
-        data: { datasets: [{ data: pts, _rgb: color, borderColor: `rgb(${color})`, borderWidth: 2, tension: 0.25, stepped: false,
-          pointRadius: c => c.raw && c.raw.trade !== undefined ? 2.5 : 0, pointHoverRadius: 5,
-          pointBackgroundColor: c => (c.raw && c.raw.trade < 0) ? '#f43f5e' : '#10b981', pointBorderWidth: 0,
+        type: 'line', plugins: [glow],
+        data: { datasets: [{ data: pts, _rgb: color, borderColor: `rgb(${color})`, borderWidth: 2.5, tension: 0.4, cubicInterpolationMode: 'monotone',
+          pointRadius: c => c.raw && c.raw.trade !== undefined ? 3 : 0, pointHoverRadius: 6, pointHoverBorderWidth: 3, pointHoverBorderColor: '#0b0f25',
+          pointBackgroundColor: c => (c.raw && c.raw.trade < 0) ? '#ff4d7d' : '#2ef2a4', pointBorderWidth: 0,
           fill: { target: 'origin' },
-          backgroundColor: c => { const { chartArea, ctx } = c.chart; const rgb = c.dataset._rgb; if (!chartArea) return `rgba(${rgb},.1)`; const g = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom); g.addColorStop(0, `rgba(${rgb},.28)`); g.addColorStop(1, `rgba(${rgb},0)`); return g; } }] },
-        options: { responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: 'nearest', intersect: false },
-          plugins: { legend: { display: false }, tooltip: { backgroundColor: '#0f141d', borderColor: 'rgba(255,255,255,.1)', borderWidth: 1, padding: 10, titleColor: '#e2e8f0', bodyColor: '#cbd5e1', displayColors: false,
+          backgroundColor: c => { const { chartArea, ctx } = c.chart; const rgb = c.dataset._rgb; if (!chartArea) return `rgba(${rgb},.1)`; const g = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom); g.addColorStop(0, `rgba(${rgb},.38)`); g.addColorStop(.55, `rgba(${rgb},.08)`); g.addColorStop(1, `rgba(${rgb},0)`); return g; } }] },
+        options: { responsive: true, maintainAspectRatio: false, animation: reduce ? false : { duration: 900, easing: 'easeOutQuart' }, interaction: { mode: 'nearest', intersect: false },
+          plugins: { legend: { display: false }, tooltip: { backgroundColor: 'rgba(13,17,38,.96)', borderColor: 'rgba(139,92,246,.45)', borderWidth: 1, padding: 12, cornerRadius: 10,
+            titleColor: '#e8ecff', bodyColor: '#c7cdea', displayColors: false, titleFont: { family: 'Inter', weight: '700' }, bodyFont: { family: 'Inter' },
             callbacks: { label: c => [`Cumulative: ${this.sgnUsd(c.raw.y)}`].concat(c.raw.trade !== undefined ? [`Trade: ${this.sgnUsd(c.raw.trade)} (${c.raw.reason})`, c.raw.slug] : []) } } },
-          scales: { x: { type: 'time', grid: { color: 'rgba(255,255,255,.04)' }, ticks: { color: '#64748b', maxTicksLimit: 8 }, border: { display: false } },
-                    y: { grid: { color: 'rgba(255,255,255,.04)' }, ticks: { color: '#64748b', callback: v => '$' + v.toFixed(2) }, border: { display: false } } } }
+          scales: { x: { type: 'time', grid: { color: 'rgba(148,163,255,.05)' }, ticks: { color: '#8390b0', maxTicksLimit: 7, font: { family: 'Inter', size: 11 } }, border: { display: false } },
+                    y: { grid: { color: 'rgba(148,163,255,.05)' }, ticks: { color: '#8390b0', font: { family: 'JetBrains Mono', size: 11 }, callback: v => '$' + v.toFixed(2) }, border: { display: false } } } }
       });
     },
+    // ---------- visual helpers ----------
+    countUp(el, v, kind = 'usd') {
+      const fmt = x => kind === 'hero' ? this.heroUsd(x) : kind === 'sgn' ? this.sgnUsd(x) : kind === 'sgnHero' ? this.sgnUsd(x) : this.usd(x);
+      const n = Number(v);
+      if (v === '' || v == null || !isFinite(n)) { el.textContent = '—'; el._v = undefined; return; }
+      const from = el._v; el._v = n;
+      const set = x => { if (kind === 'hero') el.innerHTML = fmt(x); else el.textContent = fmt(x); };
+      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (from === n) { set(n); return; }
+      if (reduce) { set(n); return; }
+      const start = from === undefined ? 0 : from, t0 = performance.now(), dur = from === undefined ? 1100 : 650;
+      if (from !== undefined) { el.classList.remove('flash-up', 'flash-down'); void el.offsetWidth; el.classList.add(n > from ? 'flash-up' : 'flash-down'); }
+      cancelAnimationFrame(el._raf);
+      const step = t => { const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 4); set(start + (n - start) * e); if (k < 1) el._raf = requestAnimationFrame(step); else set(n); };
+      el._raf = requestAnimationFrame(step);
+    },
+    heroUsd(v) { const n = Number(v); if (!isFinite(n)) return '—'; const [d, c] = Math.abs(n).toFixed(2).split('.');
+      return (n < 0 ? '−' : '') + '$' + Number(d).toLocaleString('en-US') + '<span class="cents">.' + c + '</span>'; },
+    statusPill() {
+      if (this.state.available && this.state.halted) return { label: 'HALTED', cls: 'pill-red', pulse: true };
+      return { LIVE: { label: 'LIVE', cls: 'pill-red', pulse: true }, PAPER: { label: 'PAPER', cls: 'pill-amber', pulse: true },
+        LIVE_NOT_ARMED: { label: 'LIVE · not armed', cls: 'pill-orange', pulse: false } }[this.cfg.mode] || { label: '—', cls: 'pill-muted', pulse: false };
+    },
+    windowInfo() {
+      const W = 900, now = this.now, start = Math.floor(now / W) * W, left = Math.max(0, start + W - now);
+      const mx = Number(this.cfgVal('FAV_MAX_SECS_LEFT') ?? 900), mn = Number(this.cfgVal('FAV_MIN_SECS_LEFT') ?? 600);
+      const open = left <= mx && left > mn;
+      const nextIn = open ? left - mn : (left > mx ? left - mx : left + (W - mx));
+      const t = s => new Date(s * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      return { left, pct: left / W, open, nextIn, range: `${t(start)}–${t(start + W)}`, mn, mx };
+    },
+    secsLeft(p) { return p.end_ts ? Math.round(Number(p.end_ts) - this.now) : p.secs_left; },
+    posTrack(p) {
+      const cl = x => Math.max(0, Math.min(100, x * 100));
+      const basis = (p.cost_usd && p.shares) ? Number(p.cost_usd) / Number(p.shares) : Number(p.entry_price);
+      const slp = Number(this.cfgVal('STOP_LOSS_PCT') ?? 0.6), sl = basis * (1 - slp), tp = Number(this.cfgVal('TAKE_PROFIT_MIN_BID') ?? 0.97);
+      const e = Number(p.entry_price), m = p.mark == null ? null : Number(p.mark), up = m != null && m >= e;
+      return { sl, tp, e, m, up, slX: cl(sl), tpX: cl(tp), eX: cl(e), mX: m == null ? null : cl(m),
+        fillL: m == null ? cl(e) : Math.min(cl(e), cl(m)), fillW: m == null ? 0 : Math.abs(cl(m) - cl(e)) };
+    },
+    tradeRowClass(t) { if (this.isFalse(t.ok) || t.action === 'BUY') return ''; const p = Number(t.pnl); return t.pnl === '' || t.pnl == null ? '' : (p > 0 ? 'win' : 'loss'); },
+    dayChange() { const s = this.state; if (!s.available || !s.day_start_bankroll_usd) return null; return Number(s.bankroll_usd) - Number(s.day_start_bankroll_usd); },
     // ---------- formatting ----------
     usd(v) { const n = Number(v); return isFinite(n) && v !== '' && v != null ? '$' + n.toFixed(2) : '—'; },
     sgnUsd(v) { const n = Number(v); if (!isFinite(n) || v === '' || v == null) return '—'; return (n > 0 ? '+' : n < 0 ? '−' : '') + '$' + Math.abs(n).toFixed(2); },
@@ -205,7 +252,7 @@ function dash() {
     pctOf(a, b) { if (!b) return '—'; const n = 100 * a / b; return (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n).toFixed(1) + '%'; },
     cents(v) { const n = Number(v); if (!isFinite(n) || v === '' || v == null) return '—'; const c = Math.round(n * 1000) / 10; return (Number.isInteger(c) ? c.toFixed(0) : c.toFixed(1)) + '¢'; },
     num(v, d) { const n = Number(v); return isFinite(n) && v !== '' ? n.toFixed(d) : '—'; },
-    pnlClass(v) { const n = Number(v); if (!isFinite(n) || v === '' || v == null || n === 0) return 'text-slate-200'; return n > 0 ? 'text-emerald-400' : 'text-rose-400'; },
+    pnlClass(v) { const n = Number(v); if (!isFinite(n) || v === '' || v == null || n === 0) return 't-flat'; return n > 0 ? 't-up' : 't-down'; },
     isFalse(v) { return String(v).toLowerCase() === 'false'; },
     actClass(t) { if (this.isFalse(t.ok)) return 'act-fail'; if (t.action === 'BUY') return 'act-buy'; const p = Number(t.pnl); return p > 0 ? 'act-win' : 'act-loss'; },
     fmtTime(iso) { if (!iso) return ''; const d = new Date(iso); if (isNaN(d)) return iso; const today = new Date().toDateString() === d.toDateString();
@@ -218,12 +265,12 @@ function dash() {
     heartbeatStale() { return this.proc.last_log_at && (Date.now() / 1000 - this.proc.last_log_at) > 90; },
     modeLabel() { return { LIVE: 'LIVE', PAPER: 'PAPER', LIVE_NOT_ARMED: 'LIVE · not armed' }[this.cfg.mode] || '—'; },
     modeClass() { return { LIVE: 'pill-red', PAPER: 'pill-amber', LIVE_NOT_ARMED: 'pill-orange' }[this.cfg.mode] || 'pill-muted'; },
-    verdictDot(v) { if (v === 'ENTER') return 'bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,.8)]'; if (v === 'skip:risk') return 'bg-amber-400'; if (/edge|price|spread/.test(v || '')) return 'bg-sky-400/70'; return 'bg-slate-600'; },
+    verdictDot(v) { if (v === 'ENTER') return 'bg-[#2ef2a4] shadow-[0_0_10px_rgba(46,242,164,.9)]'; if (v === 'skip:risk') return 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,.7)]'; if (/edge|price|spread/.test(v || '')) return 'bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,.7)]'; return 'bg-slate-500'; },
     verdictLabel(v) { const m = { 'ENTER': 'Entered', 'skip:fav_price': 'Skip · favorite outside price band', 'skip:fav_time': 'Skip · outside entry time window', 'skip:insufficient_edge': 'Skip · no edge after fee',
       'skip:wide_spread': 'Skip · spread too wide', 'skip:risk': 'Skip · blocked by risk limits', 'skip:no_book': 'Skip · no order book', 'skip:research_stale': 'Skip · news research stale',
       'skip:no_fresh_price_data': 'Skip · no fresh BTC price', 'skip:not_accepting_orders': 'Skip · market not accepting orders', 'skip:news_against': 'Skip · news against', 'skip:fav_duration': 'Skip · not a 15m market' };
       return m[v] || (v || '').replace('skip:', 'Skip · ').replace(/_/g, ' '); },
     filteredLog() { if (!this.logFilter) return this.logLines; const re = new RegExp(this.logFilter); return this.logLines.filter(l => re.test(l)); },
-    logClass(l) { if (/ ERROR /.test(l)) return 'text-rose-300'; if (/ WARNING /.test(l)) return 'text-amber-300'; if (/ ENTER | CLOSED /.test(l)) return 'text-emerald-300'; if (/HALT/.test(l)) return 'text-rose-300'; return 'text-slate-400'; },
+    logClass(l) { if (/ ERROR /.test(l)) return 'text-rose-300'; if (/ WARNING /.test(l)) return 'text-amber-300'; if (/ ENTER | CLOSED /.test(l)) return 'text-[#7cf9c9]'; if (/HALT/.test(l)) return 'text-rose-300'; return 'text-slate-300/80'; },
   };
 }
