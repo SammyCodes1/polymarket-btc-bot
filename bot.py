@@ -199,6 +199,37 @@ class Config:
     cryptopanic_api_key: str = _env("CRYPTOPANIC_API_KEY", "")
     newsapi_key: str = _env("NEWSAPI_KEY", "")
     news_half_life_minutes: float = _env("NEWS_HALF_LIFE_MINUTES", 30.0)
+    # --- pre-trade news & sentiment gate (favorite strategy) ---
+    # Before every favorite buy: UP only if fresh news is bullish, DOWN only if bearish, otherwise skip.
+    # Fails closed: stale / thin / unreachable news => no order. See README "News gate".
+    news_gate: bool = _env("NEWS_GATE", True)
+    news_gate_threshold: float = _env("NEWS_GATE_THRESHOLD", 0.10)      # |score| needed for bullish/bearish
+    news_gate_min_relevant: int = _env("NEWS_GATE_MIN_RELEVANT", 5)     # relevant headlines in the window
+    news_gate_min_scored: int = _env("NEWS_GATE_MIN_SCORED", 2)         # ... of which carry a non-zero score
+    news_gate_min_sources: int = _env("NEWS_GATE_MIN_SOURCES", 2)       # feeds that answered
+    news_gate_max_age_seconds: float = _env("NEWS_GATE_MAX_AGE_SECONDS", 300.0)   # last successful refresh
+    news_gate_headline_minutes: float = _env("NEWS_GATE_HEADLINE_MINUTES", 180.0)  # headlines older are ignored
+    news_gate_half_life_minutes: float = _env("NEWS_GATE_HALF_LIFE_MINUTES", 45.0)
+    news_gate_mixed_ratio: float = _env("NEWS_GATE_MIXED_RATIO", 0.6)   # minority/majority weight >= this => mixed
+    news_gate_feeds: str = _env(
+        "NEWS_GATE_FEEDS",
+        "https://news.google.com/rss/search?q=bitcoin+price+when:3h&hl=en-NG&gl=NG&ceid=NG:en,"
+        "https://news.google.com/rss/search?q=bitcoin+(funding+rate+OR+perpetual+OR+%22open+interest%22+OR+liquidations)"
+        "+when:6h&hl=en-NG&gl=NG&ceid=NG:en,"
+        "https://news.google.com/rss/search?q=crypto+exchange+(hack+OR+outage+OR+withdrawals+OR+listing+OR+delist)"
+        "+when:6h&hl=en-NG&gl=NG&ceid=NG:en,"
+        "https://news.google.com/rss/search?q=(Fed+OR+FOMC+OR+CPI+OR+inflation+OR+Powell+OR+tariffs)+markets"
+        "+when:3h&hl=en-NG&gl=NG&ceid=NG:en,"
+        "https://news.google.com/rss/search?q=bitcoin+whale+when:6h&hl=en-NG&gl=NG&ceid=NG:en,"
+        "https://news.google.com/rss/search?q=crypto+(regulation+OR+SEC+OR+CFTC+OR+ETF)+when:6h&hl=en-NG&gl=NG&ceid=NG:en,"
+        "https://www.theblock.co/rss.xml,https://www.newsbtc.com/feed/,https://cryptoslate.com/feed/,"
+        "https://bitcoinist.com/feed/",
+    )
+    # Perp funding (Hyperliquid public API, Deribit fallback; both reachable without Binance/Coinbase/Kraken).
+    # Contrarian: very positive funding (crowded longs) leans bearish. Weight 0 = shown in logs only.
+    news_gate_funding: bool = _env("NEWS_GATE_FUNDING", True)
+    news_gate_funding_weight: float = _env("NEWS_GATE_FUNDING_WEIGHT", 0.0)
+    news_gate_funding_extreme: float = _env("NEWS_GATE_FUNDING_EXTREME", 0.0003)  # 8h rate treated as "max"
     llm_scorer_enabled: bool = _env("LLM_SCORER_ENABLED", False)
     llm_api_url: str = _env("LLM_API_URL", "")   # OpenAI-compatible /v1/chat/completions
     llm_api_key: str = _env("LLM_API_KEY", "")
@@ -538,9 +569,20 @@ class NewsState:
     top_headlines: list = field(default_factory=list)
     fetched_at: float = 0.0
     ok_sources: int = 0
+    # news gate (see news_gate_verdict)
+    gate_score: float = 0.0          # -1..+1, recency weighted, includes funding if weighted
+    gate_bull_w: float = 0.0         # weight of bullish headlines
+    gate_bear_w: float = 0.0         # weight of bearish headlines
+    gate_relevant: int = 0
+    gate_scored: int = 0
+    gate_sources: int = 0
+    gate_fetched_at: float = 0.0
+    gate_headlines: list = field(default_factory=list)   # [(score, age_min, topic, title)] strongest first
+    funding_8h: Optional[float] = None
+    funding_source: str = ""
 
 
-def _rss_items(url: str) -> list[tuple[str, float]]:
+def _rss_items(url: str, titles_only: bool = False) -> list[tuple[str, float]]:
     r = HTTP.get(url, timeout=8)
     r.raise_for_status()
     items = []
@@ -551,7 +593,7 @@ def _rss_items(url: str) -> list[tuple[str, float]]:
                 if e.get(key):
                     ts = float(calendar.timegm(e[key]))   # feedparser structs are UTC
                     break
-            items.append((f"{e.get('title', '')}. {e.get('summary', '')[:300]}", ts))
+            items.append((e.get("title", "") if titles_only else f"{e.get('title', '')}. {e.get('summary', '')[:300]}", ts))
     else:  # tiny fallback parser
         for blk in re.findall(r"<item>(.*?)</item>", r.text, re.S):
             title = re.search(r"<title>(.*?)</title>", blk, re.S)
@@ -611,12 +653,208 @@ def _llm_scores(headlines: list[str]) -> Optional[list[float]]:
     return None
 
 
+# Extra lexicon for the pre-trade gate (perps/funding, exchanges, macro, whales, regulation). Phrases are matched
+# longest first and consumed, so "exchange outflows" (bullish) is not also counted as "outflows" (bearish).
+GATE_BULLISH = {
+    **BULLISH,
+    "shorts liquidated": 1.5, "short liquidations": 1.5, "short sellers": 0.6, "dovish": 1.5, "rate cuts": 1.5,
+    "cooler inflation": 1.5, "inflation cools": 1.5, "cooler-than-expected": 1.5, "softer-than-expected": 1.2,
+    "whale buys": 1.2, "whales buy": 1.2, "whales accumulate": 1.2, "whale accumulation": 1.2,
+    "exchange outflows": 1.2, "withdrawn from exchanges": 1.0, "record inflows": 2.0, "approved": 1.2,
+    "pro-crypto": 1.0, "strategic bitcoin reserve": 1.5, "rallies": 1.5, "rises": 0.8, "recovers": 1.0,
+    "recovery": 0.8, "bounce": 0.8, "reclaims": 1.2, "pumps": 1.2, "tops $": 1.0, "higher": 0.5,
+    "buying pressure": 1.2, "risk-on": 1.0, "relisted": 0.8, "lists ": 0.4, "listing": 0.4, "positive funding": 0.3,
+    "golden cross": 1.0, "new high": 1.5, "uptrend": 1.0, "optimism": 0.8,
+    "tariff relief": 1.0, "waives tariffs": 1.0, "waives threat": 0.8, "pauses tariffs": 1.0, "tariff cut": 1.0,
+    "trade deal": 0.8, "eases tariffs": 1.0,
+}
+GATE_BEARISH = {
+    **BEARISH,
+    "longs liquidated": 1.5, "long liquidations": 1.5, "hawkish": 1.5, "hotter-than-expected": 1.5,
+    "hot inflation": 1.5, "inflation rises": 1.0, "inflation jumps": 1.2, "tariff": 1.0, "tariffs": 1.0,
+    "sell pressure": 1.2, "selling pressure": 1.2, "whale sells": 1.2, "whales sell": 1.2, "whale dumps": 1.5,
+    "moves to exchange": 1.0, "sent to exchange": 1.0, "deposited to": 0.8, "exchange inflows": 1.2,
+    "halts withdrawals": 2.0, "withdrawals paused": 2.0, "suspends withdrawals": 2.0, "delist": 1.2, "sues": 1.2,
+    "charges": 0.8, "probe": 0.8, "investigation": 0.8, "slides": 1.2, "sinks": 1.5, "dips": 0.8, "lower": 0.5,
+    "loses": 0.8, "fear": 0.8, "recession": 1.2, "yields jump": 0.8, "yields rise": 0.8, "dollar rallies": 1.0,
+    "dollar strengthens": 0.8, "risk-off": 1.0, "death cross": 1.0, "downtrend": 1.0, "breakdown": 1.0,
+    "rejected": 0.8, "rejection": 0.8, "drained": 1.2, "stolen": 1.5, "weakness": 0.8, "below $": 0.4,
+}
+GATE_BEARISH.pop("breakdown", None)      # "cost breakdown" etc.: too ambiguous
+GATE_BEARISH.update({"banned": 1.5, "bans": 1.5, "hacked": 2.0})
+_GATE_STEMS = ("liquidat", "accumulat", "exploit", "delist", "tariff", "regulat", "insolven", "bankrupt")
+
+
+def _gate_pattern(k: str) -> "re.Pattern":
+    # Word-boundary match ("ban" must not hit "banking"); stems and simple inflections still match.
+    k = k.strip()
+    tail = "" if k.startswith(_GATE_STEMS) or not k[-1].isalpha() else r"(?:s|es|ed|ing)?(?![a-z])"
+    return re.compile(r"(?<![a-z0-9])" + re.escape(k) + tail)
+
+
+_GATE_LEX = sorted([(k, w) for k, w in GATE_BULLISH.items()] + [(k, -w) for k, w in GATE_BEARISH.items()],
+                   key=lambda kv: -len(kv[0]))
+_GATE_LEX = [(_gate_pattern(k), w) for k, w in _GATE_LEX]
+# Altcoin-only stories and promo spam are not BTC news.
+GATE_ALT_TERMS = ("solana", "xrp", "ripple", "dogecoin", "doge", "cardano", "worldcoin", "wld", "avax", "avalanche",
+                  "sui", "pepe", "shiba", "memecoin", "meme coin", "tron", "toncoin", "bnb", "litecoin", "chainlink",
+                  "polkadot", "hbar", "hedera", "stellar", "xlm", "aptos", "altcoin")
+GATE_SPAM_TERMS = ("next crypto to explode", "100x", "1000x", "presale", "pre-sale", "best crypto to buy",
+                   "price prediction", "to buy now", "could make you", "millionaire")
+GATE_TERMS = ("bitcoin", "btc", "crypto", "fed ", "fed's", "fomc", "cpi", "inflation", "powell", "treasury",
+              "rate cut", "tariff", "sec ", "cftc", "etf", "exchange", "whale", "funding", "perpetual", "liquidat",
+              "stablecoin", "tether", "open interest", "jobs report", "payrolls")
+GATE_TOPICS = (("perps", ("funding", "perpetual", "open interest", "liquidat", "futures", "leverage")),
+               ("whale", ("whale",)),
+               ("regulation", ("sec ", "cftc", "regulat", "lawsuit", "sues", "bill", "congress", "senate", "ban")),
+               ("exchange", ("exchange", "binance", "coinbase", "kraken", "bybit", "okx", "bitstamp", "hack", "withdraw")),
+               ("macro", ("fed ", "fed's", "fomc", "cpi", "inflation", "powell", "tariff", "treasury", "yields",
+                          "jobs report", "payrolls", "dollar", "recession")),
+               ("price", ("price", "bitcoin", "btc")))
+
+
+def gate_headline_score(title: str) -> float:
+    """Lexicon score of one headline in [-1, 1]. Longest phrases win and consume their text."""
+    t = " " + title.lower().replace("\u2019", "'") + " "
+    s = 0.0
+    for pat, w in _GATE_LEX:
+        t, n = pat.subn(" | ", t)
+        s += w * n
+    return max(-1.0, min(1.0, s / 3.0))
+
+
+def gate_relevant(title: str) -> bool:
+    t = " " + title.lower() + " "
+    if any(k in t for k in GATE_SPAM_TERMS):
+        return False
+    btc = "bitcoin" in t or re.search(r"(?<![a-z])btc(?![a-z])", t) is not None
+    if not btc and any(re.search(r"(?<![a-z])" + re.escape(a) + r"(?![a-z])", t) for a in GATE_ALT_TERMS):
+        return False
+    return any(k in t for k in GATE_TERMS)
+
+
+def gate_topic(title: str) -> str:
+    t = " " + title.lower() + " "
+    for name, keys in GATE_TOPICS:
+        if any(k in t for k in keys):
+            return name
+    return "other"
+
+
+def build_gate(cfg: "Config", entries: list, now: float, funding_8h: Optional[float] = None) -> dict:
+    """Pure: entries = [(title, published_ts)] (any sources). Returns the gate fields of NewsState."""
+    horizon = now - cfg.news_gate_headline_minutes * 60
+    seen, rows = set(), []
+    for title, ts in entries:
+        title = re.sub(r"\s+", " ", (title or "")).strip()
+        key = re.sub(r"[^a-z0-9 ]", "", title.lower())[:70]
+        if not title or key in seen or ts < horizon or not gate_relevant(title):
+            continue
+        seen.add(key)
+        rows.append((title, min(ts, now)))
+    num = den = bull = bear = 0.0
+    scored, heads = 0, []
+    for title, ts in rows:
+        age = (now - ts) / 60.0
+        w = 0.5 ** (age / cfg.news_gate_half_life_minutes)
+        sc = gate_headline_score(title)
+        num += sc * w
+        den += w
+        if sc > 0:
+            bull += sc * w
+        elif sc < 0:
+            bear += -sc * w
+        if sc != 0:
+            scored += 1
+        heads.append((round(sc, 2), round(age), gate_topic(title), title[:110], w))
+    score = (num / den) * min(1.0, den / 3.0) if den > 0 else 0.0
+    if funding_8h is not None and cfg.news_gate_funding_weight > 0:
+        f = -max(-1.0, min(1.0, funding_8h / cfg.news_gate_funding_extreme))
+        score = (1 - cfg.news_gate_funding_weight) * score + cfg.news_gate_funding_weight * f
+    heads.sort(key=lambda h: -abs(h[0]) * h[4])
+    return dict(gate_score=round(max(-1.0, min(1.0, score)), 3), gate_bull_w=round(bull, 3), gate_bear_w=round(bear, 3),
+                gate_relevant=len(rows), gate_scored=scored, gate_headlines=[h[:4] for h in heads[:6]])
+
+
+def news_gate_label(cfg: "Config", news: "NewsState") -> str:
+    hi, lo = max(news.gate_bull_w, news.gate_bear_w), min(news.gate_bull_w, news.gate_bear_w)
+    # mixed = real news on both sides (each side carries >= 0.5 weighted score), roughly balanced
+    if lo >= 0.5 and lo / hi >= cfg.news_gate_mixed_ratio and abs(news.gate_score) < 2 * cfg.news_gate_threshold:
+        return "mixed"
+    if news.gate_score >= cfg.news_gate_threshold:
+        return "bullish"
+    if news.gate_score <= -cfg.news_gate_threshold:
+        return "bearish"
+    return "neutral"
+
+
+def news_gate_verdict(cfg: "Config", news: "NewsState", side: str, now: float) -> tuple[str, str]:
+    """Pure pre-trade gate. Returns ("ok", detail) or ("skip:news_*", detail). Fails closed."""
+    if not cfg.news_gate:
+        return "ok", "gate off"
+    if news.gate_fetched_at == 0 or now - news.gate_fetched_at > cfg.news_gate_max_age_seconds:
+        return "skip:news_stale", f"last refresh {now - news.gate_fetched_at:.0f}s ago" if news.gate_fetched_at else "never fetched"
+    if news.gate_sources < cfg.news_gate_min_sources:
+        return "skip:news_sources", f"sources_ok={news.gate_sources}<{cfg.news_gate_min_sources}"
+    if news.gate_relevant < cfg.news_gate_min_relevant or news.gate_scored < cfg.news_gate_min_scored:
+        return "skip:news_thin", f"relevant={news.gate_relevant} scored={news.gate_scored}"
+    label = news_gate_label(cfg, news)
+    detail = f"{label} score={news.gate_score:+.3f} bull={news.gate_bull_w:.2f} bear={news.gate_bear_w:.2f}"
+    if label in ("neutral", "mixed"):
+        return f"skip:news_{label}", detail
+    if (label == "bullish") == (side == "UP"):
+        return "ok", detail
+    return "skip:news_against", detail
+
+
+def fetch_funding_8h() -> tuple[Optional[float], str]:
+    """BTC perp funding as an 8h rate from public APIs that work without Binance/Coinbase/Kraken."""
+    try:
+        r = HTTP.post("https://api.hyperliquid.xyz/info", json={"type": "metaAndAssetCtxs"}, timeout=8)
+        r.raise_for_status()
+        meta, ctxs = r.json()
+        i = [a["name"] for a in meta["universe"]].index("BTC")
+        return float(ctxs[i]["funding"]) * 8, "hyperliquid"     # hourly rate -> 8h
+    except Exception as e:
+        log.debug("hyperliquid funding failed: %s", e)
+    try:
+        d = get_json("https://www.deribit.com/api/v2/public/ticker", {"instrument_name": "BTC-PERPETUAL"})
+        return float(d["result"]["funding_8h"]), "deribit"
+    except Exception as e:
+        log.debug("deribit funding failed: %s", e)
+    return None, ""
+
+
+def refresh_gate(ns: "NewsState", base_entries: list) -> None:
+    """Fetch the gate's topic feeds, score them together with the general feeds, update ns in place."""
+    entries = list(base_entries)
+    ok = 1 if base_entries else 0
+    for url in [u.strip() for u in CFG.news_gate_feeds.split(",") if u.strip()]:
+        try:
+            entries += _rss_items(url, titles_only=True)
+            ok += 1
+        except Exception as e:
+            log.warning("news-gate feed failed %s: %s", url[:70], e)
+    f8, fsrc = fetch_funding_8h() if CFG.news_gate_funding else (None, "")
+    g = build_gate(CFG, entries, now_ts(), f8)
+    for k, v in g.items():
+        setattr(ns, k, v)
+    ns.gate_sources, ns.gate_fetched_at = ok, (now_ts() if ok else 0.0)
+    ns.funding_8h, ns.funding_source = f8, fsrc
+    log.info("news-gate: %s score=%+.3f bull=%.2f bear=%.2f relevant=%d scored=%d sources_ok=%d funding8h=%s top=%s",
+             news_gate_label(CFG, ns), ns.gate_score, ns.gate_bull_w, ns.gate_bear_w, ns.gate_relevant, ns.gate_scored,
+             ok, f"{f8:+.5%}({fsrc})" if f8 is not None else "n/a", [h[3][:60] for h in ns.gate_headlines[:2]])
+
+
 def refresh_news() -> NewsState:
     raw: list[tuple[str, float]] = []
     ok = 0
+    titles: list[tuple[str, float]] = []
     for url in [u.strip() for u in CFG.rss_feeds.split(",") if u.strip()]:
         try:
-            raw += _rss_items(url)
+            got = _rss_items(url)
+            raw += got
+            titles += [(t.split(". ")[0], ts) for t, ts in got]
             ok += 1
         except Exception as e:
             log.warning("news feed failed %s: %s", url[:60], e)
@@ -647,6 +885,11 @@ def refresh_news() -> NewsState:
                    top_headlines=[t[:120] for t, _ in items[:5]], fetched_at=now_ts(), ok_sources=ok)
     log.info("news: sentiment=%+.3f relevant=%d sources_ok=%d top=%s",
              ns.sentiment, ns.n_relevant, ok, ns.top_headlines[:2])
+    if CFG.news_gate and CFG.strategy == "favorite":
+        try:
+            refresh_gate(ns, titles + [(t, ts) for t, ts in api])
+        except Exception as e:      # fail closed: gate_fetched_at stays 0 -> skip:news_stale
+            log.warning("news-gate refresh failed: %s", e)
     return ns
 
 
@@ -781,6 +1024,9 @@ def _common_gates(market: BtcMarket, snap: Optional[PriceSnapshot], news: NewsSt
     return None
 
 
+_GATE_LAST: dict = {}
+
+
 def decide_favorite(market: BtcMarket, snap: Optional[PriceSnapshot], news: NewsState) -> tuple[Optional[Signal], str, dict]:
     d: dict[str, Any] = {"slug": market.slug, "secs_left": round(market.seconds_left), "elapsed": round(market.elapsed_frac, 2)}
     g = _common_gates(market, snap, news, d)
@@ -802,6 +1048,13 @@ def decide_favorite(market: BtcMarket, snap: Optional[PriceSnapshot], news: News
         lean = news.sentiment if side == "UP" else -news.sentiment
         if lean < -CFG.news_veto:
             return None, "skip:news_against", d
+    gv, gdetail = news_gate_verdict(CFG, news, side, now_ts())
+    d["news_gate"] = gdetail
+    if _GATE_LAST.get(market.slug) != gv:          # log each decision change once, not every loop
+        _GATE_LAST[market.slug] = gv
+        log.info("news-gate %s for %s %s: %s", gv, market.slug, side, gdetail)
+    if gv != "ok":
+        return None, gv, d
     edge = p_side - ask - fee_per_share(ask, market.fee_rate)
     d["edge"] = round(edge, 4)
     book = up if side == "UP" else down

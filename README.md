@@ -170,6 +170,8 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `MAX_TRADES_PER_DAY` | `20` | ✏️ | Entries per UTC day. |
 | `TAKE_PROFIT_MIN_BID` | `0.97` | ✏️ | Take profit once the bid reaches this. |
 | `STOP_LOSS_PCT` | `0.60` | ✏️ | Sell after losing this fraction of cost. |
+| `NEWS_GATE` | `true` | read-only | Pre-trade news gate: UP only if news is bullish, DOWN only if bearish, else skip (fails closed). |
+| `NEWS_GATE_THRESHOLD` / `NEWS_GATE_MIN_RELEVANT` / `NEWS_GATE_MAX_AGE_SECONDS` | `0.10` / `5` / `300` | read-only | Label threshold, minimum relevant headlines, maximum refresh age. |
 | `FAV_STOP_DROP_CENTS` | `0` (off) | read-only | Hard stop: sell once the bid is this many cents below entry (e.g. `15`). Fires before `STOP_LOSS_PCT` when tighter. |
 | `FAV_EXIT_SECONDS_LEFT` | `0` (off) | read-only | Time exit: sell any position not at take-profit with this many seconds left, and never enter with less time left. |
 | `DAILY_LOSS_LIMIT_PCT` | `0.05` | ✏️ | Halt for the UTC day after this loss. |
@@ -180,6 +182,45 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `LOOP_SECONDS` / `SCAN_SECONDS` | `5` / `20` | read-only | Main loop and market rescan intervals. |
 | `DATA_DIR` | `./data` | — | Where the bot (and dashboard) read/write files. |
 | `DASHBOARD_TOKEN` / `DASHBOARD_PORT` | — / `8787` | — | Dashboard access token and port. |
+
+## News gate (pre-trade news & sentiment filter)
+
+Before every favorite buy, at any band (including 0.82–0.92), the bot checks fresh headlines and labels them
+**bullish / bearish / neutral / mixed**. It buys UP only when the label is bullish and DOWN only when it is
+bearish. Every other case skips with no order and logs one of:
+`skip:news_neutral`, `skip:news_mixed`, `skip:news_against`, `skip:news_stale`, `skip:news_sources` or `skip:news_thin`.
+The gate is an extra filter on top of the entry rules. The 600–900 s window, the market's minimum size and
+hold-to-settlement are unchanged.
+
+* **Sources (no paid APIs; all reachable without Binance/Coinbase/Kraken).** The general feeds in `RSS_FEEDS`, plus
+  Google News RSS (Nigeria edition) searches for:
+  * BTC price
+  * perps / funding / open interest / liquidations
+  * exchange incidents and listings
+  * macro (Fed, CPI, tariffs)
+  * whales
+  * regulation / SEC / ETF
+
+  Also The Block, NewsBTC, CryptoSlate and Bitcoinist. Perp funding comes from Hyperliquid's public API, with
+  Deribit as a fallback. Funding is logged but weighted 0 by default.
+* **Scoring.** A keyword lexicon matched on word boundaries, longest phrase first. For example,
+  "shorts liquidated" scores bullish, "longs liquidated" bearish, "exchange outflows" bullish and "ETF outflows" bearish.
+  Altcoin-only stories and promo spam are dropped. Headlines are weighted by recency (45-minute half-life, last 180 min only).
+  The score is shrunk toward 0 when there are few headlines.
+* **Labels.** Bullish if score ≥ `NEWS_GATE_THRESHOLD` (0.10), bearish if ≤ −0.10. Mixed if both sides carry
+  real weight and are roughly balanced. Otherwise neutral.
+* **Fails closed.** The bot skips when:
+  * the last successful refresh is older than 300 s
+  * fewer than 2 feeds answered
+  * there are fewer than 5 relevant headlines, or fewer than 2 scored ones
+* **Turn it off** with `NEWS_GATE=false`. Entry behaviour is then exactly as before.
+* **Evidence (Oct 2026, /workspace/bt_improve).** Historical headlines aren't available for a proper backtest.
+  * BTC momentum (15–120 min) and Hyperliquid funding showed no correlation with outcomes beyond the noise level.
+  * GDELT news tone (only 9 of 21 days were downloadable) gave a borderline, insignificant hint on the 82–92¢
+    band and nothing on 85–95¢.
+  * In a 12 h replay of live feeds the gate allowed about 25% of 15-minute slots (all bearish, so DOWN only).
+    Expect roughly 80–90% fewer trades.
+  * Treat it as a caution filter, not an edge.
 
 ## Exit-rule backtest (Oct 2026): hard stop and time exit
 
