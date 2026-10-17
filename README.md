@@ -133,6 +133,7 @@ Controls:
 | Restart | Stop (as above), then Start. |
 | Force kill | Kills the process tree immediately. Positions stay open. |
 | Emergency halt & flatten | Type `HALT`. Creates the `KILL` file: the running bot sells everything and stops entering. |
+| Close (on a position card) | Shows the market, side, shares, current bid and estimated proceeds/P&L, then asks the running bot to sell that one position at market. The dashboard only writes `data/close_requests.json`; on its next loop the bot sells through its normal exit path (same fee and bookkeeping as a stop-loss), logs `CLOSED ... reason=manual_close`, adds a `SELL` row to `trades.csv` and writes the outcome to `data/close_results.json`. Requests expire after 2 minutes (`MANUAL_CLOSE_TTL_SECONDS`). A manual close counts toward the daily loss limit but not toward `MAX_CONSECUTIVE_LOSSES` or the post-loss cooldown, and the bot will not re-enter that window. Needs the bot to be running. API: `POST /api/positions/close` with `{"key"\|"token_id"\|"slug": ...}` or `{"all": true}`. |
 | Clear halt | Type `RESUME`. Bot must be stopped. Removes `KILL` and resets the halt flag in `state.json` (a drawdown halt also resets the peak to the current bankroll). |
 
 Safety:

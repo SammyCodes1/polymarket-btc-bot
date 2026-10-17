@@ -167,6 +167,7 @@ class Config:
     max_trades_per_day: int = _env("MAX_TRADES_PER_DAY", 20)
     cooldown_after_loss_seconds: int = _env("COOLDOWN_AFTER_LOSS_SECONDS", 600)
     kill_switch_file: str = _env("KILL_SWITCH_FILE", "KILL")
+    manual_close_ttl_seconds: float = _env("MANUAL_CLOSE_TTL_SECONDS", 120.0)  # dashboard Close requests expire after this
     # Bookkeeping sanity guard: a bankroll move bigger than this fraction with no trade/resolve event is
     # treated as a glitch (no new peak, no drawdown halt) until it has persisted BANK_JUMP_WINDOW_SECONDS.
     bank_jump_pct: float = _env("BANK_JUMP_PCT", 0.30)
@@ -202,6 +203,8 @@ DATA.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA / "state.json"
 DECISIONS_CSV = DATA / "decisions.csv"
 TRADES_CSV = DATA / "trades.csv"
+CLOSE_REQUESTS = DATA / "close_requests.json"   # written by the dashboard (POST /api/positions/close)
+CLOSE_RESULTS = DATA / "close_results.json"     # written by the bot: one result per request id
 
 log = logging.getLogger("pmbot")
 
@@ -1055,6 +1058,8 @@ class State:
     #         last_redeem_try, manual_notice_logged}: winners that resolved but whose $1/share payout
     #         is not in cash yet. They count toward the bankroll until the redeem shows up.
     pending_redeem: dict = field(default_factory=dict)
+    # slugs the user closed by hand from the dashboard: never re-entered (directional or arb)
+    manual_closed_slugs: list = field(default_factory=list)
 
     def save(self) -> None:
         tmp = STATE_FILE.with_suffix(".tmp")
@@ -1181,6 +1186,7 @@ class Risk:
             if self.s.halted and (self.s.halt_reason.startswith("daily") or "consecutive" in self.s.halt_reason):
                 self.s.halted, self.s.halt_reason = False, ""
             self.s.traded_slugs = self.s.traded_slugs[-200:]
+            self.s.manual_closed_slugs = self.s.manual_closed_slugs[-200:]
 
     def check_kill_switches(self, bank_trusted: bool = True) -> Optional[str]:
         if Path(CFG.kill_switch_file).exists() or (DATA / CFG.kill_switch_file).exists():
@@ -1210,6 +1216,8 @@ class Risk:
             return 0.0, "max trades per day"
         if now_ts() - self.s.last_loss_at < CFG.cooldown_after_loss_seconds:
             return 0.0, "cooling down after a loss"
+        if sig.market.slug in self.s.manual_closed_slugs:
+            return 0.0, "closed manually from the dashboard (no re-entry this window)"
         if sig.market.slug in self.s.traded_slugs:
             return 0.0, "already traded this window"
         if sum(p.kind == "dir" for p in self.s.positions.values()) >= CFG.max_open_positions:
@@ -1226,9 +1234,14 @@ class Risk:
             return 0.0, "book too thin for size"
         return round(usd, 2), "ok"
 
-    def record_close(self, pnl: float) -> None:
+    def record_close(self, pnl: float, manual: bool = False) -> None:
+        """Realized P&L always counts (daily loss limit, totals). A manual close from the dashboard is the
+        user's decision, not a strategy outcome, so it leaves consecutive_losses and the post-loss cooldown
+        untouched (neither incremented by a manual loss nor reset by a manual win)."""
         self.s.realized_pnl_day += pnl
         self.s.realized_pnl_total += pnl
+        if manual:
+            return
         if pnl < 0:
             self.s.consecutive_losses += 1
             self.s.last_loss_at = now_ts()
@@ -1270,12 +1283,70 @@ def exit_reason(cfg: "Config", *, entry: float, bid: float, shares: float, cost_
     return None
 
 
+def parse_close_requests(text: str) -> Optional[list[dict]]:
+    """Parse close_requests.json. Accepts a list or {"requests": [...]}. Returns normalized requests
+    ({id, slug, token_id, key, all, requested_at}); drops malformed entries; None if the file is garbage."""
+    try:
+        raw = json.loads(text) if text.strip() else []
+    except (ValueError, TypeError):
+        return None
+    if isinstance(raw, dict):
+        raw = raw.get("requests", [])
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        try:
+            ts = float(r.get("requested_at"))
+        except (TypeError, ValueError):
+            continue
+        if ts != ts:
+            continue
+        req = {"id": str(r.get("id") or f"anon-{ts}"), "requested_at": ts, "all": r.get("all") is True}
+        for k in ("slug", "token_id", "key"):
+            v = r.get(k)
+            req[k] = str(v) if isinstance(v, (str, int)) and str(v) else ""
+        if req["all"] or req["slug"] or req["token_id"] or req["key"]:
+            out.append(req)
+    return out
+
+
+def close_request_matches(req: dict, pos: "Position", state_key: str = "") -> bool:
+    """all -> every position; key (state.json key) or token_id -> that one position; a bare slug (no key or
+    token_id given) -> every position in that window."""
+    if req.get("all"):
+        return True
+    if req.get("key") and req["key"] in (pos.key, state_key):
+        return True
+    if req.get("token_id") and req["token_id"] == str(pos.token_id):
+        return True
+    return bool(req.get("slug")) and req["slug"] == pos.slug and not req.get("key") and not req.get("token_id")
+
+
+def load_close_results() -> list[dict]:
+    try:
+        raw = json.loads(CLOSE_RESULTS.read_text(encoding="utf-8-sig"))
+        res = raw.get("results", []) if isinstance(raw, dict) else raw
+        return [r for r in res if isinstance(r, dict)] if isinstance(res, list) else []
+    except Exception:
+        return []
+
+
+def save_close_results(results: list[dict]) -> None:
+    tmp = CLOSE_RESULTS.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"results": results[-50:]}, indent=2), encoding="utf-8")
+    os.replace(tmp, CLOSE_RESULTS)
+
+
 class PositionManager:
     def __init__(self, state: State, risk: Risk, ex: Executor) -> None:
         self.s, self.risk, self.ex = state, risk, ex
         self.guard = BankrollGuard(CFG.bank_jump_pct, CFG.bank_jump_window_seconds)
         self.balances: dict = {}      # token_id -> on-chain shares from the last refresh (live only)
         self.bank_trusted = True
+        self.last_exit: dict = {}     # details of the most recent _close() fill (for manual-close results)
         # p_up used for thesis exits: the market's own price for the favorite strategy (backtest shows
         # the market is better calibrated than our model), the model otherwise.
         if CFG.strategy == "favorite":
@@ -1383,7 +1454,8 @@ class PositionManager:
     def try_arbitrage(self, m: BtcMarket) -> None:
         """Complete-set arbitrage: if Up ask + Down ask + taker fees < $1 - ARB_MIN_EDGE, buy equal shares
         of both; exactly one side pays $1 at resolution. Rarely available (books are usually >= $1.01)."""
-        if not CFG.arb_enabled or any(k.startswith(m.slug + ":arb") for k in self.s.positions):
+        if not CFG.arb_enabled or m.slug in self.s.manual_closed_slugs \
+                or any(k.startswith(m.slug + ":arb") for k in self.s.positions):
             return
         up, down = get_book(m.up_token), get_book(m.down_token)
         if not up or not down:
@@ -1420,11 +1492,15 @@ class PositionManager:
             legs.append(pos)
         self.s.save()
 
-    def _close(self, pos: Position, reason: str, min_price: float, mkt: Optional[BtcMarket]) -> bool:
+    def _close(self, pos: Position, reason: str, min_price: float, mkt: Optional[BtcMarket],
+               manual: bool = False) -> bool:
         fake = mkt or BtcMarket(pos.slug, pos.duration, "", "", pos.start_ts, pos.end_ts, pos.token_id, pos.token_id,
                                 0.01, 5, pos.fee_rate, True, "v1")
         fill = self.ex.sell(fake, pos.token_id, pos.shares, min_price)
         pnl = fill.usd - pos.cost_usd if fill.ok else 0.0
+        self.last_exit = {"ok": fill.ok, "shares": round(fill.shares, 4), "price": round(fill.avg_price, 4),
+                          "proceeds": round(fill.usd, 4), "fee": round(fill.fee, 4),
+                          "pnl": round(pnl, 4) if fill.ok else None, "note": fill.note}
         append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "SELL",
                                 "slug": pos.slug, "side": pos.side, "ok": fill.ok, "shares": round(fill.shares, 4),
                                 "price": round(fill.avg_price, 4), "usd": round(fill.usd, 4), "fee": round(fill.fee, 4),
@@ -1432,10 +1508,10 @@ class PositionManager:
         if not fill.ok:
             log.warning("exit failed %s (%s): %s", pos.slug, reason, fill.note)
             return False
-        self._settle(pos, fill.usd, reason)
+        self._settle(pos, fill.usd, reason, manual=manual)
         return True
 
-    def _settle(self, pos: Position, proceeds: float, reason: str) -> None:
+    def _settle(self, pos: Position, proceeds: float, reason: str, manual: bool = False) -> None:
         """Close a sold position: proceeds go to cash (live: a local estimate until the next cash sync).
         Never touches peak_bankroll_usd; refresh_bankroll() does that from the consistent bankroll."""
         pnl = proceeds - pos.cost_usd
@@ -1444,7 +1520,7 @@ class PositionManager:
             self.s.positions.pop(pos.key, None)
             self.s.cash_usd += proceeds
         self._event(mutate)
-        self.risk.record_close(pnl)
+        self.risk.record_close(pnl, manual=manual)
         self.s.save()
         log.info("CLOSED %s %s reason=%s pnl=%+.2f bankroll=%.2f", pos.slug, pos.side, reason, pnl, self.s.bankroll_usd)
 
@@ -1503,6 +1579,89 @@ class PositionManager:
                  self.s.bankroll_usd, " (payout pending redeem)" if pending else "")
         if pending is not None:
             self._maybe_redeem(now_ts())
+
+    # ---- manual close requests from the dashboard (file-based; see dashboard/server.py) ----
+    def process_close_requests(self, markets: dict[str, BtcMarket], now: Optional[float] = None) -> int:
+        """Sell positions the user asked to close from the dashboard, through the same _close() market exit
+        as stop-loss/take-profit (same fee + bookkeeping, a SELL row in trades.csv, `CLOSED ... reason=
+        manual_close` in the log). Results go to close_results.json keyed by request id. Never raises.
+        Returns the number of positions closed."""
+        try:
+            return self._process_close_requests(markets, now_ts() if now is None else now)
+        except Exception as e:      # a bad request file must never take the bot down
+            log.exception("manual close: unexpected error (ignored): %s", e)
+            return 0
+
+    def _process_close_requests(self, markets: dict[str, BtcMarket], now: float) -> int:
+        if not CLOSE_REQUESTS.exists():
+            return 0
+        work = CLOSE_REQUESTS.with_suffix(".processing")
+        try:
+            os.replace(CLOSE_REQUESTS, work)       # claim the file atomically; the dashboard may write a new one
+        except OSError as e:
+            log.warning("manual close: cannot claim %s: %s", CLOSE_REQUESTS.name, e)
+            return 0
+        reqs = parse_close_requests(work.read_text(encoding="utf-8-sig", errors="replace"))
+        work.unlink(missing_ok=True)
+        if reqs is None:
+            log.warning("manual close: %s was malformed; ignored", CLOSE_REQUESTS.name)
+            return 0
+        results = load_close_results()
+        done_ids = {r.get("id") for r in results}
+        closed = 0
+        for req in reqs:
+            if req["id"] in done_ids:
+                continue                           # already handled (idempotent re-delivery)
+            res = {"id": req["id"], "slug": req.get("slug") or "", "requested_at": req["requested_at"],
+                   "handled_at": now, "positions": []}
+            age = now - req["requested_at"]
+            targets = [p for k, p in list(self.s.positions.items()) if close_request_matches(req, p, k)]
+            if age > CFG.manual_close_ttl_seconds:
+                res.update(status="expired", note=f"request was {age:.0f}s old (limit {CFG.manual_close_ttl_seconds:.0f}s)")
+            elif not targets:
+                res.update(status="not_open", note="no matching open position")
+            else:
+                outcomes = []
+                for pos in targets:
+                    o = self._manual_close_one(pos, markets, now)
+                    outcomes.append(o["status"])
+                    res["positions"].append(o)
+                    closed += o["status"] == "closed"
+                res["status"] = ("closed" if all(s == "closed" for s in outcomes)
+                                 else "partial" if "closed" in outcomes else outcomes[0])
+                res["note"] = "; ".join(o.get("note", "") for o in res["positions"] if o.get("note"))
+                res["pnl"] = round(sum(o.get("pnl") or 0.0 for o in res["positions"]), 4)
+            if res["status"] in ("expired", "not_open"):
+                log.info("manual close %s (%s): %s", res["slug"] or "all", res["status"], res["note"])
+            results.append(res)
+            done_ids.add(req["id"])
+        save_close_results(results)
+        return closed
+
+    def _manual_close_one(self, pos: Position, markets: dict[str, BtcMarket], now: float) -> dict:
+        out = {"key": pos.key, "slug": pos.slug, "side": pos.side, "shares": round(pos.shares, 4)}
+        if pos.end_ts <= now:
+            out.update(status="window_ended", note="window already ended; it settles at resolution instead")
+            return out
+        book = get_book(pos.token_id)
+        if not book or not book.bids:
+            out.update(status="failed", note="no bids in the order book right now")
+            log.warning("manual close %s failed: no bids", pos.slug)
+            return out
+        bid = book.best_bid
+        min_px = max(0.01, bid - CFG.slippage)     # same market exit as stop-loss / thesis exits
+        log.info("manual close requested from dashboard: %s %s %.2f sh, bid=%.3f", pos.slug, pos.side, pos.shares, bid)
+        self.last_exit = {}
+        ok = self._close(pos, "manual_close", min_px, markets.get(pos.slug), manual=True)
+        e = self.last_exit or {}
+        out.update(status="closed" if ok else "failed", bid=bid, price=e.get("price"), proceeds=e.get("proceeds"),
+                   fee=e.get("fee"), pnl=e.get("pnl"), note="" if ok else (e.get("note") or "sell not filled"))
+        if pos.slug not in self.s.manual_closed_slugs:
+            self.s.manual_closed_slugs.append(pos.slug)   # block re-entry into this window
+        if pos.slug not in self.s.traded_slugs:
+            self.s.traded_slugs.append(pos.slug)
+        self.s.save()
+        return out
 
     def manage(self, markets: dict[str, BtcMarket], snap: Optional[PriceSnapshot], news: NewsState,
                flatten_all: bool = False) -> None:
@@ -1656,6 +1815,7 @@ def main() -> None:
                 pm.manage(by_slug, snap, news, flatten_all=True)
                 break
 
+            pm.process_close_requests(by_slug)      # dashboard "Close" buttons (works while halted too)
             pm.manage(by_slug, snap, news)
 
             for m in markets:

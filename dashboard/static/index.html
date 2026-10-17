@@ -350,7 +350,17 @@ tailwind.config = { theme: { extend: {
               <div class="stat"><div class="stat-l">Mark</div><div class="stat-v" :title="p.mark_source" x-text="p.mark==null ? '—' : cents(p.mark)"></div></div>
               <div class="stat"><div class="stat-l">Cost</div><div class="stat-v" x-text="usd(p.cost_usd)"></div></div>
             </div>
-            <div class="mt-2.5 text-[11.5px] text-[#8390b0]">Pays <b class="text-slate-200" x-text="usd(p.max_payout)"></b> if it wins.</div>
+            <div class="mt-3 flex items-center gap-3">
+              <div class="text-[11.5px] text-[#8390b0] min-w-0">Pays <b class="text-slate-200" x-text="usd(p.max_payout)"></b> if it wins.
+                <span class="block mt-0.5 text-[#ff8aa8]" x-show="closeState(p).state==='error'" x-text="closeState(p).msg"></span></div>
+              <button type="button" class="btn btn-close-pos ml-auto shrink-0" :class="'is-' + (closeState(p).state || 'idle')"
+                      :disabled="closeDisabled(p)" :title="closeTitle(p)" @click="closePosition(p)" :aria-label="'Close position ' + p.slug">
+                <template x-if="closeState(p).state==='closing'"><span class="spinner" aria-hidden="true"></span></template>
+                <template x-if="!closeState(p).state || closeState(p).state==='error'"><svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke-linecap="round"/></svg></template>
+                <template x-if="closeState(p).state==='closed'"><svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M4 10.5l4 4 8-9" stroke-linecap="round" stroke-linejoin="round"/></svg></template>
+                <span x-text="{closing:'Closing…', closed:'Closed', error:'Retry close'}[closeState(p).state] || 'Close'"></span>
+              </button>
+            </div>
           </div>
         </template>
         <div x-show="!positions.length" class="empty py-12">
@@ -555,7 +565,7 @@ tailwind.config = { theme: { extend: {
     </template>
     <div class="mt-6 flex flex-col-reverse sm:flex-row justify-end gap-2">
       <button class="btn btn-ghost" @click="modal.open=false">Cancel</button>
-      <button class="btn" :class="modal.danger ? 'btn-red' : 'btn-primary'" :disabled="(modal.phrase && modal.input.trim().toUpperCase()!==modal.phrase) || (modal.ack && !modal.acked)" @click="modalOk()" x-text="modal.ok"></button>
+      <button class="btn" :class="modal.danger ? 'btn-red' : 'btn-primary'" :disabled="!!((modal.phrase && modal.input.trim().toUpperCase()!==modal.phrase) || (modal.ack && !modal.acked))" @click="modalOk()" x-text="modal.ok"></button>
     </div>
   </div>
 </div>

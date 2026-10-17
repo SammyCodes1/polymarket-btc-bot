@@ -5,7 +5,7 @@ function dash() {
     proc: {}, cfg: { editable: {}, display: {}, mode: '' }, state: { available: false },
     positions: [], unrealized: 0, stats: {}, statsMode: 'auto', trades: [], tradesTotal: 0,
     decisions: [], showNoise: false, logLines: [], logFollow: true, logFilter: '',
-    form: {}, modal: { open: false }, toasts: [], chart: null, now: Date.now() / 1000,
+    form: {}, modal: { open: false }, closing: {}, toasts: [], chart: null, now: Date.now() / 1000,
     setup: { needs_setup: false, starter: {} }, needsSetup: false, setupSkipped: localStorage.getItem('setupSkipped') === '1',
     setupForm: { private_key: '', wallet_address: '', showKey: false, mode: 'paper', live_confirmation: '', live_ack: false, settings: {} },
     wallet: { replacing: false, key: '', addr: '', show: false },
@@ -201,6 +201,61 @@ function dash() {
           scales: { x: { type: 'time', grid: { color: 'rgba(148,163,255,.05)' }, ticks: { color: '#8390b0', maxTicksLimit: 7, font: { family: 'Inter', size: 11 } }, border: { display: false } },
                     y: { grid: { color: 'rgba(148,163,255,.05)' }, ticks: { color: '#8390b0', font: { family: 'JetBrains Mono', size: 11 }, callback: v => '$' + v.toFixed(2) }, border: { display: false } } } }
       });
+    },
+    // ---------- manual close ("Close" button on a position) ----------
+    closeState(p) { return this.closing[p.key] || {}; },
+    closeDisabled(p) { const st = this.closeState(p).state; return st === 'closing' || st === 'closed' || !this.proc.running || this.secsLeft(p) <= 0; },
+    closeTitle(p) { if (!this.proc.running) return 'Start the bot first: it does the selling'; if (this.secsLeft(p) <= 0) return 'Window ended: it settles at resolution';
+      return 'Sell this position now at the best bid'; },
+    closeEstimate(p) {
+      const bid = p.bid == null ? null : Number(p.bid), sh = Number(p.shares) || 0, cost = Number(p.cost_usd) || 0;
+      const fr = p.fee_rate == null ? 0.07 : Number(p.fee_rate), slip = Number(this.cfgVal('SLIPPAGE') ?? 0.02);
+      if (bid == null || !isFinite(bid)) return { bid: null };
+      const fee = fr * sh * bid * (1 - bid), proceeds = sh * bid - fee;
+      return { bid, fee, proceeds, pnl: proceeds - cost, floor: Math.max(0.01, bid - slip) };
+    },
+    esc(v) { return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
+    async closePosition(p) {
+      if (this.closeDisabled(p)) return;
+      const e = this.closeEstimate(p), live = this.cfg.mode === 'LIVE';
+      const row = (k, v, cls = '') => `<dt>${k}</dt><dd class="${cls}">${v}</dd>`;
+      const body = `The bot sells all of this position at market on its next loop (a few seconds), using its normal exit path. It won't re-enter this window afterwards.`
+        + (live ? ' <b class="text-[#ff8aa8]">This is a real-money sell.</b>' : ' <span class="text-amber-300">Paper mode: simulated sell.</span>')
+        + `<dl class="close-sum">${row('Market', this.esc(p.slug))}${row('Side', this.esc(p.side), p.side === 'UP' ? 't-up' : 't-down')}`
+        + row('Shares', this.num(p.shares, 2)) + row('Best bid now', e.bid == null ? '—' : this.cents(e.bid))
+        + row('Est. proceeds', e.bid == null ? '—' : this.usd(e.proceeds)) + row('Est. P&amp;L', e.bid == null ? '—' : this.sgnUsd(e.pnl), e.bid == null ? '' : this.pnlClass(e.pnl)) + '</dl>'
+        + `<div class="mt-2 text-[11.5px] text-[#8390b0]">Estimate after the taker fee. The real fill can be lower if the bid moves: it sells down to ${e.bid == null ? 'bid − slippage' : this.cents(e.floor)} at worst.</div>`;
+      if (!(await this.confirm({ title: 'Close this position?', danger: true, ok: 'Close position', body }))) return;
+      const key = p.key;
+      this.closing = { ...this.closing, [key]: { state: 'closing' } };
+      try {
+        const r = await this.post('/api/positions/close', { key, token_id: String(p.token_id || ''), slug: p.slug });
+        this.closing = { ...this.closing, [key]: { state: 'closing', id: r.request.id } };
+        this.toast('Close requested. The bot sells on its next loop.');
+        this.pollClose(key, r.request.id, p.slug);
+      } catch (err) { this.closing = { ...this.closing, [key]: { state: 'error', msg: err.message } }; this.toast(err.message, 'err'); }
+    },
+    async pollClose(key, id, slug) {
+      const t0 = Date.now(), done = (st, msg) => { this.closing = { ...this.closing, [key]: { state: st, id, msg } }; };
+      const tick = async () => {
+        if ((this.closing[key] || {}).id !== id) return;
+        try {
+          const [c, ps] = await Promise.all([this.api('/api/positions/close'), this.api('/api/positions')]);
+          const res = (c.results || []).find(x => x.id === id);
+          const stillOpen = (ps.positions || []).some(x => x.key === key);
+          if (res && (res.status === 'closed' || res.status === 'partial')) {
+            done('closed'); this.toast(`Closed ${this.shortSlug(slug)} · P&L ${this.sgnUsd(res.pnl)}`);
+            setTimeout(() => this.refreshAll(), 1500); return;
+          }
+          if (res) { const msg = ({ not_open: 'Already closed', expired: 'Request expired: the bot did not pick it up in time', window_ended: 'Window ended: it settles at resolution' }[res.status] || 'Sell failed') + (res.note ? ` (${res.note})` : '');
+            if (res.status === 'not_open') { done('closed'); setTimeout(() => this.refreshAll(), 1500); return; }
+            done('error', msg); this.toast(msg, 'err'); return; }
+          if (!stillOpen) { done('closed'); setTimeout(() => this.refreshAll(), 1500); return; }
+        } catch (err) { /* transient; keep polling */ }
+        if (Date.now() - t0 > 150000) { const m = 'No answer from the bot. Is it running?'; done('error', m); this.toast(m, 'err'); return; }
+        setTimeout(tick, 1500);
+      };
+      setTimeout(tick, 1200);
     },
     // ---------- visual helpers ----------
     countUp(el, v, kind = 'usd') {

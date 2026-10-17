@@ -967,6 +967,102 @@ async def api_clear_halt(request: Request):
 
 
 # -----------------------------------------------------------------------------
+# Manual close ("Close" button on a position). File-based command: the dashboard only writes a request;
+# the running bot picks it up on its next loop, sells through its normal market-exit path and writes the
+# outcome to close_results.json. The dashboard never places orders itself.
+# -----------------------------------------------------------------------------
+CLOSE_TTL_SECONDS = 120          # keep in sync with bot.py MANUAL_CLOSE_TTL_SECONDS (default)
+_close_lock = threading.Lock()
+
+
+def close_requests_path() -> Path:
+    return data_dir() / "close_requests.json"
+
+
+def close_results_path() -> Path:
+    return data_dir() / "close_results.json"
+
+
+def _read_close_requests() -> list[dict]:
+    raw = read_json(close_requests_path())
+    if isinstance(raw, dict):
+        raw = raw.get("requests", [])
+    return [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+
+
+def _write_json_atomic(path: Path, obj: Any) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    for i in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:          # Windows: the bot may have the file open for a moment
+            time.sleep(0.05 * (i + 1))
+    tmp.unlink(missing_ok=True)
+    raise HTTPException(503, "Could not write the close request (file busy). Try again.")
+
+
+def queue_close_request(req_target: dict) -> tuple[dict, bool]:
+    """Append a close request (deduped against a fresh identical one). Returns (request, is_new)."""
+    import uuid
+    now = time.time()
+    with _close_lock:
+        reqs = [r for r in _read_close_requests() if now - float(r.get("requested_at") or 0) <= CLOSE_TTL_SECONDS]
+        sig = lambda r: (bool(r.get("all")), r.get("key") or "", r.get("token_id") or "", r.get("slug") or "")  # noqa: E731
+        for r in reqs:
+            if sig(r) == sig(req_target):
+                return r, False
+        req = {"id": uuid.uuid4().hex[:16], **req_target, "requested_at": now, "source": "dashboard"}
+        reqs.append(req)
+        _write_json_atomic(close_requests_path(), reqs)
+        return req, True
+
+
+@app.post("/api/positions/close", status_code=202)
+async def api_close_position(request: Request):
+    body = await _body(request)
+    st = read_json(data_dir() / "state.json") or {}
+    positions = st.get("positions") or {}
+    if body.get("all") is True:
+        target = {"all": True, "slug": "", "key": "", "token_id": ""}
+        matches = list(positions.items())
+    else:
+        target = {"all": False}
+        for k in ("slug", "key", "token_id"):
+            v = body.get(k)
+            if v is not None and not isinstance(v, (str, int)):
+                raise HTTPException(400, f"{k} must be a string")
+            v = str(v).strip() if v is not None else ""
+            if len(v) > 200:
+                raise HTTPException(400, f"{k} is too long")
+            target[k] = v
+        if not (target["slug"] or target["key"] or target["token_id"]):
+            raise HTTPException(400, "Give slug, key or token_id (or all: true).")
+        if target["key"] or target["token_id"]:
+            matches = [(k, p) for k, p in positions.items() if isinstance(p, dict) and (
+                (target["key"] and k == target["key"]) or (target["token_id"] and str(p.get("token_id")) == target["token_id"]))]
+        else:
+            matches = [(k, p) for k, p in positions.items() if isinstance(p, dict) and p.get("slug") == target["slug"]]
+    if not matches:
+        raise HTTPException(404, "No matching open position (it may have just closed).")
+    if not find_bot_processes():
+        raise HTTPException(409, "The bot isn't running, so it can't sell. Start it first (positions are unchanged).")
+    req, new = queue_close_request(target)
+    return {"ok": True, "queued": new, "request": req, "positions": [k for k, _ in matches],
+            "expires_in": CLOSE_TTL_SECONDS}
+
+
+@app.get("/api/positions/close")
+def api_close_status():
+    now = time.time()
+    pending = [r for r in _read_close_requests() if now - float(r.get("requested_at") or 0) <= CLOSE_TTL_SECONDS]
+    res = read_json(close_results_path())
+    results = res.get("results", []) if isinstance(res, dict) else []
+    return {"pending": pending, "results": [r for r in results if isinstance(r, dict)][-20:], "server_time": now}
+
+
+# -----------------------------------------------------------------------------
 # First-run wallet setup + wallet management (localhost only; key only ever goes to .env)
 # -----------------------------------------------------------------------------
 def _local_only(request: Request) -> None:

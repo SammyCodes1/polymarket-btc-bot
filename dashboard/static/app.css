@@ -222,3 +222,17 @@ details[open] > summary::before { transform: rotate(90deg); }
 [x-cloak] { display: none !important; }
 @media (max-width: 639px) { .tab { padding: .42rem .8rem; } }
 body { overflow-x: clip; }
+
+/* Close-position button: red outline (matches the glass/neon theme) */
+.btn-close-pos { height: 2rem; padding: 0 .85rem; font-size: 12.5px; color: #ff8aa8; background: rgba(255,77,125,.06); border-color: rgba(255,77,125,.55);
+  box-shadow: 0 0 0 0 rgba(255,77,125,0), inset 0 0 12px -6px rgba(255,77,125,.6); }
+.btn-close-pos:not(:disabled):hover { color: #fff; background: rgba(255,77,125,.16); border-color: #ff4d7d; box-shadow: 0 0 22px -6px rgba(255,77,125,.9), inset 0 0 14px -6px rgba(255,77,125,.8); }
+.btn-close-pos.is-closing { color: #ffd1dc; border-color: rgba(255,77,125,.4); opacity: 1 !important; cursor: progress; }
+.btn-close-pos.is-closed { color: #2ef2a4; border-color: rgba(46,242,164,.55); background: rgba(46,242,164,.08); opacity: 1 !important; }
+.spinner { width: .85rem; height: .85rem; border-radius: 9999px; border: 2px solid rgba(255,138,168,.3); border-top-color: #ff8aa8; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.close-sum { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem; margin-top: .75rem; padding: .8rem .95rem; border-radius: .9rem;
+  background: rgba(255,255,255,.035); border: 1px solid rgba(148,163,255,.12); font-size: 12.5px; }
+.close-sum dt { color: #8390b0; }
+.close-sum dd { text-align: right; font-family: 'JetBrains Mono', ui-monospace, monospace; color: #e8ecff; font-weight: 600; }
+.close-sum dd.t-up { color: #2ef2a4; } .close-sum dd.t-down { color: #ff7a9c; }
