@@ -853,8 +853,13 @@ class Executor:
 
     def __init__(self) -> None:
         self.client = None
+        self.has_gasless_key = False      # Builder/Relayer key present -> gasless redeem possible
         if CFG.live:
             self._connect_live()
+
+    @property
+    def can_redeem(self) -> bool:
+        return self.client is not None and self.has_gasless_key and CFG.auto_redeem
 
     def _connect_live(self) -> None:
         try:
@@ -874,11 +879,20 @@ class Executor:
         kwargs: dict[str, Any] = {"private_key": CFG.private_key}
         if CFG.wallet_address:
             kwargs["wallet"] = CFG.wallet_address
-        if CFG.relayer_api_key and CFG.relayer_api_key_address:
+        if CFG.builder_api_key and CFG.builder_api_secret and CFG.builder_api_passphrase:
+            from polymarket import BuilderApiKey
+            kwargs["api_key"] = BuilderApiKey(key=CFG.builder_api_key, secret=CFG.builder_api_secret,
+                                              passphrase=CFG.builder_api_passphrase)
+        elif CFG.relayer_api_key and CFG.relayer_api_key_address:
             from polymarket import RelayerApiKey
             kwargs["api_key"] = RelayerApiKey(key=CFG.relayer_api_key, address=CFG.relayer_api_key_address)
+        elif CFG.builder_api_key or CFG.relayer_api_key:
+            log.warning("incomplete API key config: Builder needs KEY+SECRET+PASSPHRASE, Relayer needs KEY+ADDRESS; "
+                        "auto-redeem disabled")
+        self.has_gasless_key = "api_key" in kwargs
         self.client = SecureClient.create(**kwargs)
-        log.warning("LIVE trading enabled. wallet=%s type=%s", self.client.wallet, self.client.wallet_type)
+        log.warning("LIVE trading enabled. wallet=%s type=%s auto-redeem=%s", self.client.wallet,
+                    self.client.wallet_type, "on" if self.can_redeem else "off (no Builder/Relayer key)")
         if "api_key" in kwargs:
             try:
                 self.client.setup_trading_approvals()  # idempotent; only submits missing approvals
@@ -903,6 +917,16 @@ class Executor:
         except Exception as e:
             log.warning("token balance read failed: %s", e)
             return None
+
+    def redeem(self, condition_id: str) -> tuple[bool, str]:
+        """Gasless redeem of a resolved market. Needs a Builder or Relayer API key (SecureClient api_key=)."""
+        if not self.can_redeem:
+            return False, "no Builder/Relayer API key configured"
+        try:
+            self.client.redeem_positions(condition_id=condition_id).wait()
+            return True, "redeemed"
+        except Exception as e:
+            return False, str(e)
 
     @staticmethod
     def _walk(levels: list, qty: float, by_usd: bool, limit: float, is_buy: bool) -> tuple[float, float]:
@@ -944,7 +968,12 @@ class Executor:
         spent, got = float(resp.making_amount), float(resp.taking_amount)
         if got <= 0:
             return Fill(False, order_id=resp.order_id, note=f"status={resp.status}, nothing filled")
-        return Fill(True, got, spent / got, spent, 0.0, resp.order_id, f"live {resp.status}")
+        px = spent / got
+        # The taker fee is charged on top of making_amount (first live fill: 4.71 matched, 4.8089 debited),
+        # so count it in the cost basis or realized P&L is overstated by the fee. AcceptedOrder carries no
+        # fee field (ok/order_id/status/making_amount/taking_amount/...), so use the fee formula.
+        fee = got * fee_per_share(px, market.fee_rate)
+        return Fill(True, got, px, spent + fee, fee, resp.order_id, f"live {resp.status}")
 
     def sell(self, market: BtcMarket, token_id: str, shares: float, min_price: float) -> Fill:
         if self.client is None:
@@ -973,7 +1002,9 @@ class Executor:
         sold, got = float(resp.making_amount), float(resp.taking_amount)
         if sold <= 0:
             return Fill(False, order_id=resp.order_id, note=f"status={resp.status}, nothing filled")
-        return Fill(True, sold, got / sold, got, 0.0, resp.order_id, f"live {resp.status}")
+        px = got / sold
+        fee = sold * fee_per_share(px, market.fee_rate)   # estimate; the cash sync is the source of truth
+        return Fill(True, sold, px, got - fee, fee, resp.order_id, f"live {resp.status}")
 
 
 # =============================================================================
@@ -994,6 +1025,7 @@ class Position:
     fee_rate: float
     order_id: str = ""
     kind: str = "dir"        # "dir" (directional) or "arb" (one leg of a complete set, held to resolution)
+    cash_at_end: Optional[float] = None   # live: cash seen when the window ended (detects an early redeem)
 
     @property
     def key(self) -> str:
@@ -1002,6 +1034,9 @@ class Position:
 
 @dataclass
 class State:
+    # bankroll_usd is ALWAYS the one consistent definition (see compute_bankroll):
+    #   cash + open positions (at cost) + resolved-but-unredeemed winners ($1/share)
+    # It is only ever written by PositionManager.refresh_bankroll(); peak/drawdown/day-start use it.
     bankroll_usd: float
     peak_bankroll_usd: float
     day: str
@@ -1015,6 +1050,11 @@ class State:
     halt_reason: str = ""
     traded_slugs: list = field(default_factory=list)
     positions: dict = field(default_factory=dict)
+    cash_usd: float = 0.0          # live: pUSD from the CLOB balance call; paper: simulated cash
+    # key -> {slug, side, token_id, condition_id, shares, payout, cost_usd, resolved_at, cash_at_resolve,
+    #         last_redeem_try, manual_notice_logged}: winners that resolved but whose $1/share payout
+    #         is not in cash yet. They count toward the bankroll until the redeem shows up.
+    pending_redeem: dict = field(default_factory=dict)
 
     def save(self) -> None:
         tmp = STATE_FILE.with_suffix(".tmp")
@@ -1022,17 +1062,97 @@ class State:
         tmp.replace(STATE_FILE)
 
     @classmethod
-    def load(cls, starting_bankroll: float) -> "State":
+    def from_dict(cls, raw: dict) -> "State":
+        raw = dict(raw)
+        pos_fields = set(Position.__dataclass_fields__)
+        raw["positions"] = {k: Position(**{f: x for f, x in v.items() if f in pos_fields}) if isinstance(v, dict) else v
+                            for k, v in raw.get("positions", {}).items()}
+        known = set(cls.__dataclass_fields__)
+        st = cls(**{k: v for k, v in raw.items() if k in known})
+        if "cash_usd" not in raw:
+            # pre-fix state files: paper bankroll_usd was cash; live gets re-synced right away anyway
+            st.cash_usd = st.bankroll_usd if not CFG.live else max(0.0, st.bankroll_usd - sum(
+                p.cost_usd for p in st.positions.values()))
+        return st
+
+    @classmethod
+    def load(cls, starting_cash: float) -> "State":
         today = datetime.now(timezone.utc).date().isoformat()
         if STATE_FILE.exists():
-            raw = json.loads(STATE_FILE.read_text())
-            raw["positions"] = {k: Position(**v) if isinstance(v, dict) else v for k, v in raw.get("positions", {}).items()}
-            st = cls(**raw)
-            if CFG.live and starting_bankroll:
-                st.bankroll_usd = starting_bankroll
+            st = cls.from_dict(json.loads(STATE_FILE.read_text()))
+            if CFG.live and starting_cash is not None:
+                st.cash_usd = starting_cash      # bankroll_usd is recomputed by refresh_bankroll()
             return st
-        return cls(bankroll_usd=starting_bankroll, peak_bankroll_usd=starting_bankroll,
-                   day=today, day_start_bankroll_usd=starting_bankroll)
+        return cls(bankroll_usd=starting_cash, peak_bankroll_usd=starting_cash, day=today,
+                   day_start_bankroll_usd=starting_cash, cash_usd=starting_cash)
+
+
+def held_value(shares: float, unit_value: float, onchain_shares: Optional[float], cash_now: float,
+               cash_ref: Optional[float]) -> float:
+    """Value of shares we still believe we hold. If the chain/CLOB says the tokens are gone (redeemed),
+    or cash rose by ~the $1/share payout since cash_ref, they are worth 0 here (the cash already has them)."""
+    if onchain_shares is not None:
+        return max(0.0, min(shares, onchain_shares)) * unit_value
+    if cash_ref is not None and cash_now - cash_ref >= 0.9 * shares:
+        return 0.0
+    return shares * unit_value
+
+
+def compute_bankroll(cash: float, positions: dict, pending: dict,
+                     balances: Optional[dict] = None, now: Optional[float] = None) -> tuple[float, dict]:
+    """THE bankroll: cash + open positions at cost + resolved-unredeemed winners at $1/share.
+    balances: token_id -> on-chain share balance (None/missing = unknown). Returns (bankroll, parts)."""
+    balances = balances or {}
+    now = now_ts() if now is None else now
+    open_v = 0.0
+    for p in positions.values():
+        unit = p.cost_usd / p.shares if p.shares > 0 else 0.0
+        if p.end_ts > now:
+            open_v += p.cost_usd                 # window still live: tokens can't have been redeemed
+        else:
+            open_v += held_value(p.shares, unit, balances.get(p.token_id), cash, p.cash_at_end)
+    pend_v = sum(held_value(e["shares"], 1.0, balances.get(e["token_id"]), cash, e.get("cash_at_resolve"))
+                 for e in pending.values())
+    return cash + open_v + pend_v, {"cash": cash, "open": open_v, "pending_redeem": pend_v}
+
+
+class BankrollGuard:
+    """Sanity guard against bookkeeping glitches: a bankroll move of more than BANK_JUMP_PCT with no
+    trade/resolve event is not trusted (no new peak, no drawdown halt) until it has persisted for
+    BANK_JUMP_WINDOW_SECONDS. Trade events (open/close/resolve) are trusted immediately."""
+
+    def __init__(self, pct: float, window: float) -> None:
+        self.pct, self.window = pct, window
+        self.ref: Optional[float] = None
+        self.anomaly_since: Optional[float] = None
+
+    def note_event(self, delta: float) -> None:
+        """A trade/resolve event moved our own bookkeeping by delta: that move is expected."""
+        if self.ref is not None:
+            self.ref += delta
+
+    def observe(self, bank: float, now: float) -> bool:
+        """Returns True if this bankroll value can be trusted for peak/drawdown this tick."""
+        if self.ref is None:
+            self.ref, self.anomaly_since = bank, None
+            return True
+        base = max(abs(self.ref), 1e-9)
+        if abs(bank - self.ref) / base <= self.pct:
+            self.ref, self.anomaly_since = bank, None
+            return True
+        first = self.anomaly_since is None
+        if first:
+            self.anomaly_since = now
+        if now - self.anomaly_since >= self.window:
+            log.warning("bankroll move %.2f -> %.2f persisted %.0fs; accepting it", self.ref, bank,
+                        now - self.anomaly_since)
+            self.ref, self.anomaly_since = bank, None
+            return True
+        if first:      # log once per anomaly, not every 5s tick
+            log.warning("bankroll jumped %.2f -> %.2f (%+.0f%%) with no trade event; treating it as a bookkeeping "
+                        "glitch for up to %.0fs (no new peak, drawdown halt skipped)", self.ref, bank,
+                        100 * (bank - self.ref) / base, self.window)
+        return False
 
 
 def size_usd(cfg: "Config", *, bank: float, p_side: float, price: float, total_exposure: float,
@@ -1062,12 +1182,12 @@ class Risk:
                 self.s.halted, self.s.halt_reason = False, ""
             self.s.traded_slugs = self.s.traded_slugs[-200:]
 
-    def check_kill_switches(self) -> Optional[str]:
+    def check_kill_switches(self, bank_trusted: bool = True) -> Optional[str]:
         if Path(CFG.kill_switch_file).exists() or (DATA / CFG.kill_switch_file).exists():
             return "kill switch file present"
         if self.s.realized_pnl_day <= -CFG.daily_loss_limit_pct * self.s.day_start_bankroll_usd:
             return f"daily loss limit hit ({self.s.realized_pnl_day:.2f})"
-        if self.s.bankroll_usd <= self.s.peak_bankroll_usd * (1 - CFG.max_drawdown_pct):
+        if bank_trusted and self.s.bankroll_usd <= self.s.peak_bankroll_usd * (1 - CFG.max_drawdown_pct):
             return f"max drawdown hit (bankroll {self.s.bankroll_usd:.2f} vs peak {self.s.peak_bankroll_usd:.2f})"
         if self.s.consecutive_losses >= CFG.max_consecutive_losses:
             return f"{self.s.consecutive_losses} consecutive losses"
@@ -1153,12 +1273,89 @@ def exit_reason(cfg: "Config", *, entry: float, bid: float, shares: float, cost_
 class PositionManager:
     def __init__(self, state: State, risk: Risk, ex: Executor) -> None:
         self.s, self.risk, self.ex = state, risk, ex
+        self.guard = BankrollGuard(CFG.bank_jump_pct, CFG.bank_jump_window_seconds)
+        self.balances: dict = {}      # token_id -> on-chain shares from the last refresh (live only)
+        self.bank_trusted = True
         # p_up used for thesis exits: the market's own price for the favorite strategy (backtest shows
         # the market is better calibrated than our model), the model otherwise.
         if CFG.strategy == "favorite":
             self.estimator = lambda m, sn, ptb, nw, bk: bk.mid if bk_is_up(m, bk) else 1 - bk.mid
         else:
             self.estimator = lambda m, sn, ptb, nw, bk: estimate_p_up(m, sn, ptb, nw).p_up
+
+    # ---- bankroll bookkeeping (the ONLY place bankroll_usd / peak_bankroll_usd are written) ----
+    def _recompute(self) -> float:
+        bank, _ = compute_bankroll(self.s.cash_usd, self.s.positions, self.s.pending_redeem, self.balances)
+        self.s.bankroll_usd = bank
+        return bank
+
+    def _event(self, mutate) -> None:
+        """Apply a trade/resolve mutation and tell the guard how much our own books moved."""
+        before = self._recompute()
+        mutate()
+        self.guard.note_event(self._recompute() - before)
+
+    def refresh_bankroll(self, cash: Optional[float] = None, now: Optional[float] = None) -> bool:
+        """Sync cash (live), detect redeemed tokens, recompute the bankroll, update the peak only
+        from a trusted value. Returns True if the bankroll can be used for the drawdown check."""
+        now = now_ts() if now is None else now
+        if cash is not None:
+            self.s.cash_usd = cash
+        if self.ex.client is not None:
+            for pos in self.s.positions.values():
+                if pos.end_ts <= now:
+                    if pos.cash_at_end is None:
+                        pos.cash_at_end = self.s.cash_usd
+                    self.balances[pos.token_id] = self.ex.token_balance(pos.token_id)
+            for key, e in list(self.s.pending_redeem.items()):
+                bal = self.ex.token_balance(e["token_id"])
+                self.balances[e["token_id"]] = bal
+                self._maybe_clear_pending(key, e, bal, now)
+            self._maybe_redeem(now)
+        bank, parts = compute_bankroll(self.s.cash_usd, self.s.positions, self.s.pending_redeem, self.balances, now)
+        self.s.bankroll_usd = bank
+        self.bank_trusted = self.guard.observe(bank, now)
+        if self.bank_trusted:
+            self.s.peak_bankroll_usd = max(self.s.peak_bankroll_usd, bank)
+        log.debug("bankroll %.2f = cash %.2f + open %.2f + pending_redeem %.2f (trusted=%s)", bank,
+                  parts["cash"], parts["open"], parts["pending_redeem"], self.bank_trusted)
+        return self.bank_trusted
+
+    def _maybe_clear_pending(self, key: str, e: dict, bal: Optional[float], now: float) -> None:
+        """A pending winner is redeemed once cash rose by ~its payout, or its tokens have been gone for
+        2+ minutes (so a lagging cash balance can't make the bankroll dip by the payout)."""
+        cash_up = self.s.cash_usd - e.get("cash_at_resolve", self.s.cash_usd) >= 0.9 * e["payout"]
+        if bal is not None and bal < 1e-6:
+            e.setdefault("zero_since", now)
+        else:
+            e.pop("zero_since", None)
+        gone = "zero_since" in e and now - e["zero_since"] >= 120
+        if cash_up or gone:
+            self.s.pending_redeem.pop(key, None)
+            log.info("redeem confirmed for %s (%s): $%.2f now in cash", e["slug"],
+                     "cash rose by the payout" if cash_up else "tokens gone", e["payout"])
+
+    def _maybe_redeem(self, now: float) -> None:
+        for key, e in self.s.pending_redeem.items():
+            if not self.ex.can_redeem:
+                if not e.get("manual_notice_logged"):
+                    log.warning("%s: winning %.4f %s shares ($%.2f) need redeeming. No Builder/Relayer API key "
+                                "is set, so redeem them in the Polymarket UI (Portfolio > Claim). They keep "
+                                "counting toward the bankroll until the payout shows up in cash.",
+                                e["slug"], e["shares"], e["side"], e["payout"])
+                    e["manual_notice_logged"] = True
+                continue
+            if not e.get("condition_id") or now - e.get("last_redeem_try", 0) < CFG.redeem_retry_seconds:
+                continue
+            if self.balances.get(e["token_id"]) == 0:
+                continue          # already redeemed (e.g. by Polymarket); waiting for cash to confirm
+            e["last_redeem_try"] = now
+            ok, note = self.ex.redeem(e["condition_id"])
+            if ok:
+                log.info("auto-redeem submitted for %s ($%.2f)", e["slug"], e["payout"])
+            else:
+                log.warning("auto-redeem failed for %s: %s (retrying every %ds; or redeem in the Polymarket UI)",
+                            e["slug"], note, CFG.redeem_retry_seconds)
 
     def open(self, sig: Signal, usd: float) -> None:
         max_price = min(0.99, sig.ask + CFG.slippage)
@@ -1171,12 +1368,15 @@ class PositionManager:
             log.info("entry not filled %s: %s", sig.market.slug, fill.note)
             return
         m = sig.market
-        self.s.positions[m.slug] = Position(m.slug, m.duration, sig.side, sig.token_id, fill.shares, fill.avg_price,
-                                            fill.usd, now_ts(), m.end_ts, m.start_ts, m.fee_rate, fill.order_id)
+
+        def mutate() -> None:
+            self.s.positions[m.slug] = Position(m.slug, m.duration, sig.side, sig.token_id, fill.shares,
+                                                fill.avg_price, fill.usd, now_ts(), m.end_ts, m.start_ts,
+                                                m.fee_rate, fill.order_id)
+            self.s.cash_usd -= fill.usd     # live: local estimate until the next cash sync
+        self._event(mutate)
         self.s.traded_slugs.append(m.slug)
         self.s.trades_today += 1
-        if not CFG.live:
-            self.s.bankroll_usd -= fill.usd
         self.s.save()
         log.info("OPENED %s %s %.2f sh @ %.3f ($%.2f)", m.slug, sig.side, fill.shares, fill.avg_price, fill.usd)
 
@@ -1212,9 +1412,11 @@ class PositionManager:
                 return
             pos = Position(m.slug, m.duration, side, token, fill.shares, fill.avg_price, fill.usd, now_ts(),
                            m.end_ts, m.start_ts, m.fee_rate, fill.order_id, kind="arb")
-            self.s.positions[pos.key] = pos
-            if not CFG.live:
-                self.s.bankroll_usd -= fill.usd
+
+            def mutate(pos: Position = pos, usd: float = fill.usd) -> None:
+                self.s.positions[pos.key] = pos
+                self.s.cash_usd -= usd
+            self._event(mutate)
             legs.append(pos)
         self.s.save()
 
@@ -1234,12 +1436,15 @@ class PositionManager:
         return True
 
     def _settle(self, pos: Position, proceeds: float, reason: str) -> None:
+        """Close a sold position: proceeds go to cash (live: a local estimate until the next cash sync).
+        Never touches peak_bankroll_usd; refresh_bankroll() does that from the consistent bankroll."""
         pnl = proceeds - pos.cost_usd
-        if not CFG.live:
-            self.s.bankroll_usd += proceeds
-        self.s.peak_bankroll_usd = max(self.s.peak_bankroll_usd, self.s.bankroll_usd)
+
+        def mutate() -> None:
+            self.s.positions.pop(pos.key, None)
+            self.s.cash_usd += proceeds
+        self._event(mutate)
         self.risk.record_close(pnl)
-        self.s.positions.pop(pos.key, None)
         self.s.save()
         log.info("CLOSED %s %s reason=%s pnl=%+.2f bankroll=%.2f", pos.slug, pos.side, reason, pnl, self.s.bankroll_usd)
 
@@ -1257,23 +1462,47 @@ class PositionManager:
                 p = 1.0 if p >= 0.99 else 0.0
                 m["closed"] = True
             if m.get("closed") and p in (0.0, 1.0):
-                if CFG.live:
-                    redeemed = False
-                    if p == 1.0 and self.ex.client is not None:
-                        try:
-                            self.ex.client.redeem_positions(condition_id=m["conditionId"]).wait()
-                            redeemed = True
-                        except Exception as e:
-                            log.warning("auto-redeem failed for %s: %s", pos.slug, e)
-                    if not redeemed and p == 1.0:
-                        log.warning("%s resolved WIN; redeem in the Polymarket UI if auto-redeem is unavailable", pos.slug)
-                append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "RESOLVE",
-                                        "slug": pos.slug, "side": pos.side, "ok": True, "shares": pos.shares, "price": p,
-                                        "usd": round(pos.shares * p, 4), "fee": 0, "pnl": round(pos.shares * p - pos.cost_usd, 4),
-                                        "reason": "resolution", "note": ""})
-                self._settle(pos, pos.shares * p, "resolved")
+                self.resolve(pos, p, m.get("conditionId", ""))
         except Exception as e:
             log.debug("resolution check %s: %s", pos.slug, e)
+
+    def resolve(self, pos: Position, p: float, condition_id: str = "") -> None:
+        """Book a resolved position. Live winners whose tokens are still on-chain go to pending_redeem
+        (still worth $1/share); if the tokens are already gone, the payout is already in the synced cash."""
+        pending = None
+        payout = pos.shares * p
+        if CFG.live and p == 1.0:
+            bal = self.ex.token_balance(pos.token_id) if self.ex.client is not None else None
+            already = (bal is not None and bal < 1e-6) or (
+                bal is None and pos.cash_at_end is not None and self.s.cash_usd - pos.cash_at_end >= 0.9 * pos.shares)
+            if already:
+                log.info("%s resolved WIN and was already redeemed (payout already in cash)", pos.slug)
+            else:
+                pending = {"slug": pos.slug, "side": pos.side, "token_id": pos.token_id,
+                           "condition_id": condition_id, "shares": pos.shares, "payout": round(payout, 6),
+                           "cost_usd": pos.cost_usd, "resolved_at": now_ts(), "cash_at_resolve": self.s.cash_usd,
+                           "last_redeem_try": 0.0, "manual_notice_logged": False}
+        # Paper: the payout goes straight to simulated cash. Live: never add it to cash locally -- either it
+        # is parked in pending_redeem, or it was already redeemed (synced cash has it), or it is a loser ($0).
+        proceeds_to_cash = 0.0 if CFG.live else payout
+        append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "RESOLVE",
+                                "slug": pos.slug, "side": pos.side, "ok": True, "shares": pos.shares, "price": p,
+                                "usd": round(payout, 4), "fee": 0, "pnl": round(payout - pos.cost_usd, 4),
+                                "reason": "resolution", "note": "pending redeem" if pending else ""})
+        pnl = payout - pos.cost_usd
+
+        def mutate() -> None:
+            self.s.positions.pop(pos.key, None)
+            if pending is not None:
+                self.s.pending_redeem[pos.key] = pending
+            self.s.cash_usd += proceeds_to_cash
+        self._event(mutate)
+        self.risk.record_close(pnl)
+        self.s.save()
+        log.info("CLOSED %s %s reason=resolved pnl=%+.2f bankroll=%.2f%s", pos.slug, pos.side, pnl,
+                 self.s.bankroll_usd, " (payout pending redeem)" if pending else "")
+        if pending is not None:
+            self._maybe_redeem(now_ts())
 
     def manage(self, markets: dict[str, BtcMarket], snap: Optional[PriceSnapshot], news: NewsState,
                flatten_all: bool = False) -> None:
@@ -1329,12 +1558,38 @@ def log_decision(verdict: str, d: dict, extra: str = "") -> None:
     append_csv(DECISIONS_CSV, row)
 
 
+def startup_migrations(state: State, reset_halt: bool = False) -> None:
+    """Run after the first consistent bankroll refresh.
+    - --reset-halt: clear any halt and re-anchor the peak at the current bankroll.
+    - Auto-fix for the pre-fix double-count bug: a 'max drawdown hit' halt whose bankroll is NOT really
+      10%+ below a recomputed peak (max of today's start and now) is cleared and the peak reset."""
+    bank = state.bankroll_usd
+    if reset_halt:
+        log.warning("--reset-halt: clearing halt (%r), peak %.2f -> %.2f", state.halt_reason,
+                    state.peak_bankroll_usd, bank)
+        state.halted, state.halt_reason = False, ""
+        state.peak_bankroll_usd = bank
+        return
+    if state.halted and state.halt_reason.startswith("max drawdown hit"):
+        new_peak = max(state.day_start_bankroll_usd, bank)
+        if bank > new_peak * (1 - CFG.max_drawdown_pct):
+            log.warning("migration: clearing stale halt (%r). Recomputed bankroll %.2f vs recomputed peak %.2f "
+                        "is not a %.0f%% drawdown; peak %.2f -> %.2f", state.halt_reason, bank, new_peak,
+                        100 * CFG.max_drawdown_pct, state.peak_bankroll_usd, new_peak)
+            state.halted, state.halt_reason = False, ""
+            state.peak_bankroll_usd = new_peak
+        else:
+            log.warning("migration: drawdown halt kept (bankroll %.2f vs recomputed peak %.2f)", bank, new_peak)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Polymarket BTC Up/Down 5m/15m bot (paper mode by default)")
     ap.add_argument("--max-loops", type=int, default=0, help="stop after N loops (0 = run forever)")
     ap.add_argument("--flatten", action="store_true", help="close all open positions and exit")
     ap.add_argument("--stop-after-trades", type=int, default=0,
                     help="exit once N entries were made this run and all positions are closed (0 = never)")
+    ap.add_argument("--reset-halt", action="store_true",
+                    help="clear a saved halt (halted/halt_reason) and set peak_bankroll = current bankroll")
     args = ap.parse_args()
     setup_logging()
     signal.signal(signal.SIGINT, _handle_sig)
@@ -1348,11 +1603,22 @@ def main() -> None:
         raise SystemExit(f"DRY_RUN=false but LIVE_TRADING_CONFIRM is not '{LIVE_CONFIRM_PHRASE}'. Refusing to trade live.")
     ex = Executor()
     live_bal = ex.collateral_balance_usd()
+    for _ in range(5):
+        if not CFG.live or live_bal is not None:
+            break
+        time.sleep(5)
+        live_bal = ex.collateral_balance_usd()
+    if CFG.live and live_bal is None:
+        raise SystemExit("Could not read the live pUSD balance; not starting (bankroll would be wrong).")
     state = State.load(live_bal if live_bal is not None else CFG.paper_bankroll_usd)
     risk = Risk(state)
     pm = PositionManager(state, risk, ex)
-    log.info("mode=%s bankroll=$%.2f open_positions=%d", "LIVE" if CFG.live else "PAPER (dry run)",
-             state.bankroll_usd, len(state.positions))
+    pm.refresh_bankroll(live_bal)
+    startup_migrations(state, reset_halt=args.reset_halt)
+    state.save()
+    log.info("mode=%s bankroll=$%.2f (cash %.2f, %d open, %d pending redeem) peak=$%.2f halted=%s",
+             "LIVE" if CFG.live else "PAPER (dry run)", state.bankroll_usd, state.cash_usd, len(state.positions),
+             len(state.pending_redeem), state.peak_bankroll_usd, state.halted)
 
     news = NewsState()
     markets: list[BtcMarket] = []
@@ -1376,14 +1642,11 @@ def main() -> None:
                 log.info("scanner: %d live BTC up/down markets: %s", len(markets),
                          ", ".join(f"{m.slug}({m.seconds_left:.0f}s)" for m in markets[:6]))
             snap = fetch_btc_prices()
-            if CFG.live:
-                bal = ex.collateral_balance_usd()
-                if bal is not None:
-                    state.bankroll_usd = bal + sum(p.cost_usd for p in state.positions.values())
-                    state.peak_bankroll_usd = max(state.peak_bankroll_usd, state.bankroll_usd)
+            # One consistent bankroll: cash + open positions + resolved-unredeemed winners (see compute_bankroll)
+            trusted = pm.refresh_bankroll(ex.collateral_balance_usd() if CFG.live else None)
             by_slug = {m.slug: m for m in markets}
 
-            halt = risk.check_kill_switches()
+            halt = risk.check_kill_switches(bank_trusted=trusted)
             if halt and not state.halted:
                 state.halted, state.halt_reason = True, halt
                 log.error("HALTING new entries: %s -- flattening positions", halt)
