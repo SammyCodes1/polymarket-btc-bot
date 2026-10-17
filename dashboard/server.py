@@ -56,7 +56,14 @@ STOP_GRACE_SECONDS = 45
 # Keys whose values must never leave the server.
 SECRET_KEYS = {"POLYMARKET_PRIVATE_KEY", "POLYMARKET_WALLET_ADDRESS", "POLYMARKET_RELAYER_API_KEY",
                "POLYMARKET_RELAYER_API_KEY_ADDRESS", "LIVE_TRADING_CONFIRM", "CRYPTOPANIC_API_KEY",
-               "NEWSAPI_KEY", "LLM_API_KEY", "DASHBOARD_TOKEN"}
+               "NEWSAPI_KEY", "LLM_API_KEY", "DASHBOARD_TOKEN", "POLYMARKET_BUILDER_API_KEY",
+               "POLYMARKET_BUILDER_API_SECRET", "POLYMARKET_BUILDER_API_PASSPHRASE"}
+ENV_EXAMPLE = BOT_DIR / ".env.example"
+KEY_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+# Starter risk settings shown on the first-run screen (defaults come from .env.example).
+STARTER_KEYS = ["MAX_POSITION_USD", "MAX_TRADES_PER_DAY", "DAILY_LOSS_LIMIT_PCT", "STOP_LOSS_PCT",
+                "MAX_DRAWDOWN_PCT", "FAV_MIN_PRICE", "FAV_MAX_PRICE"]
 
 # Read-only keys shown in the UI (defaults mirror bot.py's Config).
 DISPLAY_DEFAULTS: dict[str, Any] = {
@@ -124,9 +131,28 @@ def read_env() -> dict[str, str]:
     return out
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Atomic write, owner-only permissions where the OS supports it (chmod 600)."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
 def write_env_values(updates: dict[str, str]) -> None:
-    """Replace KEY=... lines in place (keeping comments/order), append missing keys. Atomic."""
-    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
+    """Replace KEY=... lines in place (keeping comments/order), append missing keys. Atomic.
+    A missing .env is created from .env.example so the file keeps its comments."""
+    if ENV_FILE.exists():
+        lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+    elif ENV_EXAMPLE.exists():
+        lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = []
     done: set[str] = set()
     for i, line in enumerate(lines):
         if line.lstrip().startswith("#"):
@@ -144,12 +170,9 @@ def write_env_values(updates: dict[str, str]) -> None:
         lines.append("")
         lines.append("# --- set by dashboard ---")
         lines.extend(f"{k}={updates[k]}" for k in missing)
-    if ENV_FILE.exists():
-        bak = ENV_FILE.with_name(ENV_FILE.name + ".bak")
-        bak.write_text(ENV_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-    tmp = ENV_FILE.with_name(ENV_FILE.name + ".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.replace(tmp, ENV_FILE)
+    # No backup copy on purpose: the key must live only in .env. Remove one left by older versions.
+    ENV_FILE.with_name(ENV_FILE.name + ".bak").unlink(missing_ok=True)
+    _write_private(ENV_FILE, "\n".join(lines) + "\n")
 
 
 def _as_bool(v: Any) -> bool:
@@ -195,6 +218,28 @@ def mode_info(env: Optional[dict] = None) -> dict:
         mode = "LIVE" if armed else "LIVE_NOT_ARMED"
     return {"mode": mode, "dry_run": dry, "live_armed": armed, "wallet_key_configured": has_key,
             "env_file_exists": ENV_FILE.exists()}
+
+
+def mask_address(a: str) -> str:
+    return f"{a[:6]}…{a[-4:]}" if a and len(a) > 12 else ("set" if a else "")
+
+
+def example_defaults() -> dict[str, str]:
+    out: dict[str, str] = {}
+    if ENV_EXAMPLE.exists():
+        for line in ENV_EXAMPLE.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = _ENV_LINE.match(line)
+            if m and not line.lstrip().startswith("#"):
+                out[m.group(1)] = _unquote(m.group(2))
+    return out
+
+
+def wallet_info(env: Optional[dict] = None) -> dict:
+    env = env if env is not None else read_env()
+    key, addr = env.get("POLYMARKET_PRIVATE_KEY", ""), env.get("POLYMARKET_WALLET_ADDRESS", "")
+    return {"env_file_exists": ENV_FILE.exists(), "key_set": bool(key), "key_valid": bool(KEY_RE.match(key)) if key else False,
+            "address_set": bool(addr), "address_masked": mask_address(addr),
+            "needs_setup": (not ENV_FILE.exists()) or not key or not addr}
 
 
 # -----------------------------------------------------------------------------
@@ -628,7 +673,7 @@ def config_view() -> dict:
     for k, spec in EDITABLE.items():
         editable[k] = {**spec, "value": _coerce(env.get(k), spec["default"]), "from_env": k in env}
     display = {k: _coerce(env.get(k), d) for k, d in DISPLAY_DEFAULTS.items()}
-    return {"editable": editable, "display": display, **mode_info(env), "env_file": str(ENV_FILE.name),
+    return {"editable": editable, "display": display, **mode_info(env), "wallet": wallet_info(env), "env_file": str(ENV_FILE.name),
             "ui_live_phrase": UI_LIVE_PHRASE}
 
 
@@ -727,7 +772,8 @@ def health():
 
 @app.get("/api/status")
 def api_status():
-    return {"process": process_status(), **mode_info(), "token_required": bool(dashboard_token()),
+    return {"process": process_status(), **mode_info(), "needs_setup": wallet_info()["needs_setup"],
+            "token_required": bool(dashboard_token()),
             "server_time": time.time(), "bot_dir": BOT_DIR.name, "data_dir_exists": data_dir().exists()}
 
 
@@ -737,9 +783,10 @@ def api_state():
     if st is None:
         return {"available": False}
     st = {k: v for k, v in st.items() if k != "traded_slugs"}
-    for p in (st.get("positions") or {}).values():
-        if isinstance(p, dict):
-            p.pop("order_id", None)
+    for grp in ("positions", "pending_redeem"):
+        for p in (st.get(grp) or {}).values():
+            if isinstance(p, dict):
+                p.pop("order_id", None)
     return {"available": True, **st}
 
 
@@ -818,11 +865,15 @@ async def api_config_save(request: Request):
     if "DRY_RUN" in clean and clean["DRY_RUN"] == "false" and cur["dry_run"]:
         if (body.get("live_confirmation") or "").strip() != UI_LIVE_PHRASE:
             raise HTTPException(403, f"Switching to LIVE needs the typed confirmation '{UI_LIVE_PHRASE}'.")
+        if not read_env().get("POLYMARKET_PRIVATE_KEY"):
+            raise HTTPException(409, "No private key is set. Add your wallet first (Settings → Wallet).")
         if not cur["live_armed"]:
-            raise HTTPException(409, "LIVE_TRADING_CONFIRM is not set in .env, so the bot would refuse to trade live. "
-                                     "Add it to .env by hand first (the dashboard never writes it).")
+            if body.get("live_ack") is not True:
+                raise HTTPException(403, "Tick 'I understand this uses real money' to arm live trading.")
+            clean["LIVE_TRADING_CONFIRM"] = LIVE_CONFIRM_PHRASE   # the sanctioned, typed-confirmation path
     env = read_env()
     changed = {k: v for k, v in clean.items() if env.get(k) != v}
+    changed_public = sorted(k for k in changed if k not in SECRET_KEYS)
     if changed:
         write_env_values(changed)
     restarted = False
@@ -833,7 +884,7 @@ async def api_config_save(request: Request):
                 raise HTTPException(403, "Saved, but restarting in LIVE mode needs confirm_live=true.")
             _run_op("restart", lambda: (stop_bot_blocking(), start_bot()))
             restarted = True
-    return {"ok": True, "changed": sorted(changed), "restarting": restarted, "config": config_view()}
+    return {"ok": True, "changed": changed_public, "restarting": restarted, "config": config_view()}
 
 
 def _live_guard(body: dict) -> None:
@@ -909,6 +960,116 @@ async def api_clear_halt(request: Request):
         tmp.write_text(json.dumps(st, indent=2), encoding="utf-8")
         os.replace(tmp, sp)
     return {"ok": True, "removed_kill_files": removed, "cleared_halt": cleared}
+
+
+# -----------------------------------------------------------------------------
+# First-run wallet setup + wallet management (localhost only; key only ever goes to .env)
+# -----------------------------------------------------------------------------
+def _local_only(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, "Wallet setup is only allowed from this computer (127.0.0.1).")
+
+
+def _clean_key(raw: Any) -> str:
+    k = str(raw or "").strip()
+    if not KEY_RE.match(k):
+        raise HTTPException(422, "Private key format is wrong: expected 64 hex characters, optionally starting with 0x.")
+    return k if k.lower().startswith("0x") else "0x" + k
+
+
+def _clean_addr(raw: Any) -> str:
+    a = str(raw or "").strip()
+    if not ADDR_RE.match(a):
+        raise HTTPException(422, "Wallet address format is wrong: expected 0x followed by 40 hex characters.")
+    return a
+
+
+def _live_arm_check(body: dict) -> None:
+    if (body.get("live_confirmation") or "").strip() != UI_LIVE_PHRASE or body.get("live_ack") is not True:
+        raise HTTPException(403, f"Live mode needs '{UI_LIVE_PHRASE}' typed and the real-money box ticked.")
+
+
+@app.get("/api/setup")
+def api_setup_get():
+    ex = example_defaults()
+    starter = {}
+    for k in STARTER_KEYS:
+        spec = EDITABLE[k]
+        starter[k] = {**spec, "value": _coerce(ex.get(k), spec["default"])}
+    return {**wallet_info(), **mode_info(), "starter": starter, "ui_live_phrase": UI_LIVE_PHRASE,
+            "example_exists": ENV_EXAMPLE.exists()}
+
+
+@app.post("/api/setup")
+async def api_setup_post(request: Request):
+    _local_only(request)
+    body = await _body(request)
+    mode = (body.get("mode") or "paper").lower()
+    skip_wallet = bool(body.get("skip_wallet"))
+    updates: dict[str, str] = {}
+    if skip_wallet:
+        if mode != "paper":
+            raise HTTPException(422, "Live mode needs a private key and wallet address.")
+    else:
+        updates["POLYMARKET_PRIVATE_KEY"] = _clean_key(body.get("private_key"))
+        updates["POLYMARKET_WALLET_ADDRESS"] = _clean_addr(body.get("wallet_address"))
+    settings = body.get("settings") or {}
+    if not isinstance(settings, dict):
+        raise HTTPException(422, "settings must be an object")
+    settings = {k: v for k, v in settings.items() if k in STARTER_KEYS}
+    if settings:
+        updates.update(validate_updates(settings))
+    if mode == "live":
+        _live_arm_check(body)
+        updates["DRY_RUN"] = "false"
+        updates["LIVE_TRADING_CONFIRM"] = LIVE_CONFIRM_PHRASE
+    elif mode == "paper":
+        updates["DRY_RUN"] = "true"
+        updates["LIVE_TRADING_CONFIRM"] = ""
+    else:
+        raise HTTPException(422, "mode must be 'paper' or 'live'")
+    running = bool(find_bot_processes())
+    write_env_values(updates)
+    started, start_error = False, None
+    if body.get("start"):
+        try:
+            if running:
+                await run_in_threadpool(lambda: (stop_bot_blocking(), start_bot()))
+            else:
+                await run_in_threadpool(start_bot)
+            started = True
+        except HTTPException as e:
+            start_error = redact(str(e.detail))
+    return {"ok": True, "started": started, "start_error": start_error, **wallet_info(), **mode_info()}
+
+
+@app.get("/api/wallet")
+def api_wallet():
+    return {**wallet_info(), **mode_info()}
+
+
+@app.post("/api/wallet/replace")
+async def api_wallet_replace(request: Request):
+    _local_only(request)
+    body = await _body(request)
+    updates = {"POLYMARKET_PRIVATE_KEY": _clean_key(body.get("private_key"))}
+    if body.get("wallet_address"):
+        updates["POLYMARKET_WALLET_ADDRESS"] = _clean_addr(body.get("wallet_address"))
+    write_env_values(updates)
+    return {"ok": True, "restart_needed": bool(find_bot_processes()), **wallet_info()}
+
+
+@app.post("/api/wallet/remove")
+async def api_wallet_remove(request: Request):
+    _local_only(request)
+    body = await _body(request)
+    if (body.get("confirmation") or "").strip().upper() != "REMOVE":
+        raise HTTPException(403, "Type REMOVE to confirm.")
+    if find_bot_processes():
+        raise HTTPException(409, "Stop the bot before removing the key.")
+    write_env_values({"POLYMARKET_PRIVATE_KEY": "", "DRY_RUN": "true", "LIVE_TRADING_CONFIRM": ""})
+    return {"ok": True, **wallet_info(), **mode_info()}
 
 
 # -----------------------------------------------------------------------------

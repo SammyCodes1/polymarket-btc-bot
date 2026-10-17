@@ -51,12 +51,12 @@ tailwind.config = { theme: { extend: {
       </span>
     </div>
 
-    <nav class="ml-auto flex items-center gap-1 rounded-xl bg-white/[0.03] p-1 border border-white/5">
+    <nav x-show="!showSetup()" class="ml-auto flex items-center gap-1 rounded-xl bg-white/[0.03] p-1 border border-white/5">
       <button class="tab" :class="tab==='overview' && 'tab-on'" @click="tab='overview'">Overview</button>
       <button class="tab" :class="tab==='settings' && 'tab-on'" @click="tab='settings'; loadConfig()">Settings</button>
     </nav>
 
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2" x-show="!showSetup()">
       <button class="btn btn-green" :disabled="proc.running || !!proc.op || busy" @click="startBot()">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M6.3 2.84A1.5 1.5 0 0 0 4 4.11v11.78a1.5 1.5 0 0 0 2.3 1.27l9.34-5.89a1.5 1.5 0 0 0 0-2.54L6.3 2.84Z"/></svg>Start</button>
       <button class="btn btn-ghost" :disabled="!proc.running || !!proc.op || busy" @click="stopBot()">
@@ -79,7 +79,7 @@ tailwind.config = { theme: { extend: {
 <!-- Banners -->
 <div class="mx-auto max-w-[1400px] px-6 mt-4 space-y-2">
   <template x-if="offline"><div class="banner banner-red">Can't reach the dashboard server. Is <span class="font-mono">python dashboard/server.py</span> still running?</div></template>
-  <template x-if="cfg.mode==='LIVE_NOT_ARMED'"><div class="banner banner-amber">DRY_RUN is off but LIVE_TRADING_CONFIRM isn't set in .env, so the bot will refuse to start. Add it to .env by hand, or switch back to paper mode.</div></template>
+  <template x-if="cfg.mode==='LIVE_NOT_ARMED'"><div class="banner banner-amber">DRY_RUN is off but live trading isn't armed (LIVE_TRADING_CONFIRM missing), so the bot will refuse to start. Switch to Live in Settings (typed confirmation) or back to Paper.</div></template>
   <template x-if="proc.kill_file_present"><div class="banner banner-red">KILL file present: the bot halts and flattens on its next loop and won't start until you use <b>Clear halt</b>.</div></template>
   <template x-if="!proc.running && proc.last_stderr"><div class="banner banner-amber"><div class="font-medium mb-1">Last run ended with output on stderr:</div><pre class="font-mono text-[11px] whitespace-pre-wrap text-amber-100/80" x-text="proc.last_stderr"></pre></div></template>
   <template x-if="proc.op_message && !proc.op"><div class="banner banner-slate flex items-center"><span x-text="proc.op_message"></span><button class="ml-auto text-slate-500 hover:text-slate-300" @click="proc.op_message=''">✕</button></div></template>
@@ -87,15 +87,114 @@ tailwind.config = { theme: { extend: {
 
 <main class="mx-auto max-w-[1400px] px-6 py-5 space-y-5">
 
+<!-- ============================== FIRST-RUN SETUP ============================== -->
+<section x-show="showSetup()" style="display:none" class="max-w-[880px] mx-auto">
+  <div class="text-center mt-4 mb-8">
+    <div class="mx-auto h-14 w-14 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-600 grid place-items-center text-white font-bold text-2xl shadow-xl shadow-orange-500/20">₿</div>
+    <h1 class="mt-5 text-[28px] font-semibold tracking-tight text-white">Set up your bot</h1>
+    <p class="mt-2 text-slate-400 text-[15px]">Connect your Polymarket wallet, pick a mode and a few limits, then start. Takes about a minute.</p>
+  </div>
+
+  <div class="banner banner-amber mb-5 text-[13px] leading-relaxed">
+    <b>Risk warning.</b> This is experimental software, not financial advice. Short-term BTC markets are close to random, fees and spreads eat small edges, and <b>you can lose everything you put in.</b> Start in paper mode.
+  </div>
+
+  <!-- Step 1: wallet -->
+  <div class="card mb-5">
+    <div class="card-head"><div class="flex items-center gap-3"><span class="step">1</span><div><div class="card-title">Your Polymarket wallet</div><div class="card-sub">Needed for live trading. Stored only in the local <span class="font-mono">.env</span> file on this computer.</div></div></div></div>
+    <div class="px-5 pb-5 space-y-4">
+      <div>
+        <label class="text-[13px] font-medium text-slate-200" for="pk">Private key</label>
+        <div class="mt-1.5 relative">
+          <input id="pk" :type="setupForm.showKey ? 'text' : 'password'" autocomplete="off" spellcheck="false" class="field font-mono pr-20" :class="setupForm.private_key && !keyOk() ? 'field-bad' : ''" placeholder="0x… (64 hex characters)" x-model="setupForm.private_key">
+          <button type="button" class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-white px-2 py-1 rounded-md bg-white/5" @click="setupForm.showKey=!setupForm.showKey" x-text="setupForm.showKey ? 'Hide' : 'Show'"></button>
+        </div>
+        <div class="mt-1 text-[11px]" :class="setupForm.private_key && !keyOk() ? 'text-rose-300' : 'text-slate-500'" x-text="setupForm.private_key && !keyOk() ? 'Expected 64 hex characters, optionally starting with 0x.' : 'The signer key for the wallet you use on Polymarket. Use a dedicated wallet holding only funds you can afford to lose.'"></div>
+      </div>
+      <div>
+        <label class="text-[13px] font-medium text-slate-200" for="addr">Polymarket wallet address</label>
+        <input id="addr" autocomplete="off" spellcheck="false" class="field font-mono mt-1.5" :class="setupForm.wallet_address && !addrOk() ? 'field-bad' : ''" placeholder="0x… (40 hex characters)" x-model="setupForm.wallet_address">
+        <div class="mt-1 text-[11px]" :class="setupForm.wallet_address && !addrOk() ? 'text-rose-300' : 'text-slate-500'" x-text="setupForm.wallet_address && !addrOk() ? 'Expected 0x followed by 40 hex characters.' : 'Your Polymarket account (deposit/proxy) wallet address, the one that holds your funds on Polymarket.'"></div>
+      </div>
+      <details class="rounded-xl border border-white/5 bg-white/[0.02] px-4 py-3 text-[12.5px] text-slate-400 leading-relaxed">
+        <summary class="cursor-pointer text-slate-300 font-medium">Where do I find these?</summary>
+        <ul class="mt-2 space-y-1.5 list-disc pl-5">
+          <li><b class="text-slate-300">Wallet address:</b> on polymarket.com, open your profile menu and copy your account wallet address. This is the address that holds your Polymarket balance.</li>
+          <li><b class="text-slate-300">Private key, if you sign in with a browser wallet</b> (MetaMask, Rabby, or another wallet via WalletConnect): export the key of that account from the wallet app's account details.</li>
+          <li><b class="text-slate-300">Private key, if you sign in with email or Google:</b> Polymarket offers a key export option in your account. Follow Polymarket's own instructions.</li>
+          <li>Safest: create a <b class="text-slate-300">fresh wallet just for this bot</b>, sign in to Polymarket with it and deposit a small amount. The key controls everything in that wallet.</li>
+        </ul>
+      </details>
+    </div>
+  </div>
+
+  <!-- Step 2: mode -->
+  <div class="card mb-5">
+    <div class="card-head"><div class="flex items-center gap-3"><span class="step">2</span><div><div class="card-title">Trading mode</div><div class="card-sub">You can switch later in Settings.</div></div></div></div>
+    <div class="px-5 pb-5">
+      <div class="grid grid-cols-2 gap-3">
+        <button type="button" class="mode-card" :class="setupForm.mode==='paper' ? 'mode-on-paper' : ''" @click="setupForm.mode='paper'">
+          <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-amber-300"></span><span class="font-semibold text-white">Paper</span><span class="ml-auto text-[10px] uppercase tracking-wider text-amber-300/80">recommended</span></div>
+          <div class="mt-1.5 text-[12px] text-slate-400 text-left">Simulated fills against the live order book. No real orders, no money at risk.</div>
+        </button>
+        <button type="button" class="mode-card" :class="setupForm.mode==='live' ? 'mode-on-live' : ''" @click="setupForm.mode='live'">
+          <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-rose-400"></span><span class="font-semibold text-white">Live</span></div>
+          <div class="mt-1.5 text-[12px] text-slate-400 text-left">Places real orders with your wallet's funds (pUSD). Losses are real.</div>
+        </button>
+      </div>
+      <div x-show="setupForm.mode==='live'" class="mt-4 rounded-xl border border-rose-500/25 bg-rose-500/[0.05] p-4 space-y-3" style="display:none">
+        <div>
+          <label class="text-xs text-rose-200/90">Type <span class="font-mono text-white">GO LIVE</span> to enable real-money trading</label>
+          <input class="field mt-1.5 font-mono" x-model="setupForm.live_confirmation" placeholder="GO LIVE">
+        </div>
+        <label class="flex items-start gap-2.5 text-[13px] text-slate-300 cursor-pointer select-none">
+          <input type="checkbox" class="mt-0.5 accent-rose-500" x-model="setupForm.live_ack">
+          <span>I understand this uses real money and I can lose all of it.</span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: starter limits -->
+  <div class="card mb-5">
+    <div class="card-head"><div class="flex items-center gap-3"><span class="step">3</span><div><div class="card-title">Starter risk limits</div><div class="card-sub">Conservative defaults. Everything else is in Settings.</div></div></div></div>
+    <div class="px-5 pb-5 grid grid-cols-2 md:grid-cols-4 gap-4">
+      <template x-for="k in Object.keys(setup.starter || {})" :key="k">
+        <div>
+          <label class="text-[12px] font-medium text-slate-300" x-text="setup.starter[k].label"></label>
+          <div class="mt-1 flex items-center gap-2">
+            <input type="number" class="field py-1.5" :min="setup.starter[k].min" :max="setup.starter[k].max" :step="setup.starter[k].step" x-model="setupForm.settings[k]">
+          </div>
+          <div class="mt-0.5 text-[10.5px] text-slate-500" x-text="hintFor(k, setupForm.settings[k])"></div>
+        </div>
+      </template>
+    </div>
+    <div class="px-5 pb-5 -mt-1 text-[11.5px] text-slate-500">Each trade is also capped at 2% of your bankroll and Polymarket's minimum order is 5 shares, so with the defaults you need roughly <b class="text-slate-400">$250+</b> before the bot can place a trade. Change <span class="font-mono">MAX_POSITION_PCT</span> in .env only if you accept bigger bets.</div>
+  </div>
+
+  <div class="flex items-center gap-4 mb-3">
+    <div class="flex items-start gap-2 text-[11.5px] text-slate-500 max-w-[480px]">
+      <svg class="h-4 w-4 shrink-0 mt-px text-emerald-400/80" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 1.5 3 4.5v5c0 4.3 3 7.6 7 9 4-1.4 7-4.7 7-9v-5l-7-3Zm3.2 6.3a.75.75 0 0 0-1.2-.9L9.2 10.6 7.9 9.3a.75.75 0 1 0-1.06 1.06l1.9 1.9a.75.75 0 0 0 1.13-.08l3.33-4.38Z" clip-rule="evenodd"/></svg>
+      <span>Your key is saved only to <span class="font-mono text-slate-400">.env</span> on this computer (git-ignored, owner-only permissions). It is never shown again, logged, or sent anywhere except to sign your own Polymarket orders.</span>
+    </div>
+    <div class="ml-auto flex items-center gap-3">
+      <button type="button" class="text-[12.5px] text-slate-400 hover:text-slate-200 underline-offset-4 hover:underline" @click="skipSetup()" :disabled="busy">Skip, explore in paper mode</button>
+      <button type="button" class="btn btn-green h-10 px-5 text-[14px]" :disabled="!setupReady() || busy" @click="saveSetup()">
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M6.3 2.84A1.5 1.5 0 0 0 4 4.11v11.78a1.5 1.5 0 0 0 2.3 1.27l9.34-5.89a1.5 1.5 0 0 0 0-2.54L6.3 2.84Z"/></svg>
+        <span x-text="busy ? 'Saving…' : (setupForm.mode==='live' ? 'Save & Start live' : 'Save & Start')"></span></button>
+    </div>
+  </div>
+</section>
+
 <!-- ============================== OVERVIEW ============================== -->
-<section x-show="tab==='overview'" class="space-y-5">
+<section x-show="tab==='overview' && !showSetup()" class="space-y-5">
 
   <!-- KPIs -->
   <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
     <div class="kpi">
       <div class="kpi-label">Bankroll</div>
       <div class="kpi-value" x-text="state.available ? usd(state.bankroll_usd) : '—'"></div>
-      <div class="kpi-sub">peak <span x-text="state.available ? usd(state.peak_bankroll_usd) : '—'"></span></div>
+      <div class="kpi-sub">peak <span x-text="state.available ? usd(state.peak_bankroll_usd) : '—'"></span><template x-if="state.available && state.cash_usd != null"><span> · cash <span x-text="usd(state.cash_usd)"></span></span></template><template x-if="pendingCount()"><span class="text-amber-300/90"> · <span x-text="pendingCount()"></span> to redeem</span></template></div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Today's P&amp;L</div>
@@ -279,11 +378,11 @@ tailwind.config = { theme: { extend: {
 </section>
 
 <!-- ============================== SETTINGS ============================== -->
-<section x-show="tab==='settings'" class="space-y-5" style="display:none">
+<section x-show="tab==='settings' && !showSetup()" class="space-y-5" style="display:none">
   <div class="flex items-end justify-between">
     <div>
       <h2 class="text-xl font-semibold text-white tracking-tight">Strategy &amp; risk settings</h2>
-      <p class="text-sm text-slate-500 mt-1">Writes only these keys to <span class="font-mono text-slate-400" x-text="cfg.env_file || '.env'"></span>. Keys, wallet and secrets are never shown or edited here.</p>
+      <p class="text-sm text-slate-500 mt-1">Writes only these keys to <span class="font-mono text-slate-400" x-text="cfg.env_file || '.env'"></span>. Secrets are never shown. Manage your wallet in the Wallet card below.</p>
     </div>
     <div class="flex items-center gap-3">
       <span class="text-xs text-slate-500" x-show="dirtyCount()"><span class="text-amber-300" x-text="dirtyCount()"></span> unsaved change(s)</span>
@@ -324,12 +423,31 @@ tailwind.config = { theme: { extend: {
           <button id="modePaper" class="rounded-lg py-2.5 text-sm font-medium" :class="isPaperForm() ? 'bg-amber-400/15 text-amber-200 ring-1 ring-amber-400/30' : 'text-slate-400'" @click="form.DRY_RUN=true">Paper</button>
           <button id="modeLive" class="rounded-lg py-2.5 text-sm font-medium" :class="!isPaperForm() ? 'bg-rose-500/15 text-rose-200 ring-1 ring-rose-500/30' : 'text-slate-400'" @click="form.DRY_RUN=false">Live</button>
         </div>
-        <p class="mt-3 text-[12px] text-slate-500 leading-relaxed" x-show="!isPaperForm()">Switching to live asks you to type <span class="font-mono text-rose-300">GO LIVE</span>. The bot also needs <span class="font-mono">LIVE_TRADING_CONFIRM</span> in .env, which you add by hand. It's currently <b x-text="cfg.live_armed ? 'set' : 'not set'" :class="cfg.live_armed ? 'text-emerald-400' : 'text-amber-300'"></b>.</p>
+        <p class="mt-3 text-[12px] text-slate-500 leading-relaxed" x-show="!isPaperForm()">Switching to live asks you to type <span class="font-mono text-rose-300">GO LIVE</span> and confirm it uses real money. Live trading is currently <b x-text="cfg.live_armed ? 'armed' : 'not armed'" :class="cfg.live_armed ? 'text-emerald-400' : 'text-amber-300'"></b>.</p>
+        <p class="mt-3 text-[12px] text-slate-500 leading-relaxed" x-show="isPaperForm()">Paper trades are simulated against the live order book. No orders are sent.</p>
       </div>
     </div>
-    <div class="card lg:col-span-2">
+    <div class="card lg:col-span-1">
+      <div class="card-head"><div><div class="card-title">Wallet</div><div class="card-sub">The key is never shown after saving</div></div>
+        <span class="pill" :class="(cfg.wallet||{}).key_set ? 'pill-green' : 'pill-muted'" x-text="(cfg.wallet||{}).key_set ? 'key set: yes' : 'key set: no'"></span></div>
+      <div class="px-5 pb-5 space-y-3">
+        <div class="flex items-center justify-between rounded-lg bg-white/[0.03] px-3 py-2.5"><span class="text-xs text-slate-500">Address</span><span class="font-mono text-[13px] text-slate-200" x-text="(cfg.wallet||{}).address_masked || 'not set'"></span></div>
+        <div class="flex items-center justify-between rounded-lg bg-white/[0.03] px-3 py-2.5"><span class="text-xs text-slate-500">Private key</span><span class="font-mono text-[13px] text-slate-400" x-text="(cfg.wallet||{}).key_set ? '••••••••••••' : 'not set'"></span></div>
+        <div x-show="wallet.replacing" class="space-y-2" style="display:none">
+          <div class="relative"><input :type="wallet.show ? 'text' : 'password'" autocomplete="off" spellcheck="false" class="field font-mono pr-16 text-[13px]" placeholder="New private key (0x + 64 hex)" x-model="wallet.key">
+            <button type="button" class="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-slate-400 hover:text-white px-2 py-0.5 rounded bg-white/5" @click="wallet.show=!wallet.show" x-text="wallet.show ? 'Hide' : 'Show'"></button></div>
+          <input autocomplete="off" spellcheck="false" class="field font-mono text-[13px]" placeholder="Wallet address (optional: keep current)" x-model="wallet.addr">
+          <div class="flex gap-2"><button class="btn btn-primary" :disabled="busy || !isKey(wallet.key) || (wallet.addr && !isAddr(wallet.addr))" @click="replaceKey()">Save key</button><button class="btn btn-ghost" @click="wallet={replacing:false,key:'',addr:'',show:false}">Cancel</button></div>
+        </div>
+        <div x-show="!wallet.replacing" class="flex gap-2">
+          <button class="btn btn-ghost" @click="wallet.replacing=true" x-text="(cfg.wallet||{}).key_set ? 'Replace key' : 'Add key'"></button>
+          <button class="btn btn-ghost text-rose-300" :disabled="!(cfg.wallet||{}).key_set || busy" @click="removeKey()">Remove key</button>
+        </div>
+      </div>
+    </div>
+    <div class="card lg:col-span-1">
       <div class="card-head"><div><div class="card-title">Other settings (read-only)</div><div class="card-sub">Change these in .env by hand</div></div></div>
-      <div class="px-5 pb-5 grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2">
+      <div class="px-5 pb-5 grid grid-cols-1 gap-x-6 gap-y-0.5 max-h-[300px] overflow-auto">
         <template x-for="(v,k) in cfg.display" :key="k">
           <div class="flex items-center justify-between border-b border-white/[0.04] py-1.5"><span class="font-mono text-[11px] text-slate-500" x-text="k"></span><span class="font-mono text-[12px] text-slate-300" x-text="String(v)"></span></div>
         </template>
@@ -358,9 +476,12 @@ tailwind.config = { theme: { extend: {
       <div class="mt-4"><label class="text-xs text-slate-400">Type <span class="font-mono text-slate-200" x-text="modal.phrase"></span> to confirm</label>
         <input class="field mt-1.5 font-mono" x-model="modal.input" @keydown.enter="modalOk()" x-ref="phraseInput"></div>
     </template>
+    <template x-if="modal.ack">
+      <label class="mt-3 flex items-start gap-2.5 text-[13px] text-slate-300 cursor-pointer select-none"><input type="checkbox" class="mt-0.5 accent-rose-500" x-model="modal.acked"><span x-text="modal.ack"></span></label>
+    </template>
     <div class="mt-6 flex justify-end gap-2">
       <button class="btn btn-ghost" @click="modal.open=false">Cancel</button>
-      <button class="btn" :class="modal.danger ? 'btn-red' : 'btn-primary'" :disabled="modal.phrase && modal.input.trim().toUpperCase()!==modal.phrase" @click="modalOk()" x-text="modal.ok"></button>
+      <button class="btn" :class="modal.danger ? 'btn-red' : 'btn-primary'" :disabled="(modal.phrase && modal.input.trim().toUpperCase()!==modal.phrase) || (modal.ack && !modal.acked)" @click="modalOk()" x-text="modal.ok"></button>
     </div>
   </div>
 </div>

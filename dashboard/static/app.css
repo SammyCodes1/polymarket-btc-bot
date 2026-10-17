@@ -80,3 +80,15 @@ header, main, footer { position: relative; z-index: 1; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 9px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.16); background-clip: padding-box; border: 2px solid transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+.step { display: grid; place-items: center; height: 1.75rem; width: 1.75rem; border-radius: 999px; font-size: 12px; font-weight: 700;
+  background: rgba(59,130,246,.15); color: #93c5fd; border: 1px solid rgba(59,130,246,.3); }
+.mode-card { display: block; width: 100%; padding: .9rem 1rem; border-radius: .85rem; border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.02); transition: all .15s; }
+.mode-card:hover { background: rgba(255,255,255,.04); }
+.mode-on-paper { border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.06); box-shadow: 0 0 0 3px rgba(251,191,36,.08); }
+.mode-on-live { border-color: rgba(244,63,94,.5); background: rgba(244,63,94,.06); box-shadow: 0 0 0 3px rgba(244,63,94,.08); }
+.field-bad { border-color: rgba(244,63,94,.55) !important; }
+details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: '▸'; display: inline-block; margin-right: .4rem; transition: transform .15s; }
+details[open] > summary::before { transform: rotate(90deg); }

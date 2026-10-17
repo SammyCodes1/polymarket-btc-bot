@@ -21,9 +21,40 @@ markets, plus a local web dashboard to watch and control it. It runs in **paper 
 > Paper-trade for days first. If you then go live, use a small amount you can afford to lose.
 > Check that Polymarket is permitted where you live (see [Restrictions](#restrictions)).
 
-## Setup
+## Quick start (dashboard, ~2 minutes)
 
-Python 3.11+ is required for live mode (the official `polymarket-client` SDK). 3.12 is recommended.
+You need **Python 3.11+** ([python.org](https://www.python.org/downloads/); on Windows tick
+*"Add python.exe to PATH"*) and **git**.
+
+1. **Clone**
+   ```bash
+   git clone https://github.com/SammyCodes1/polymarket-btc-bot.git
+   cd polymarket-btc-bot
+   ```
+2. **Launch the dashboard.** On Windows, double-click **`start_dashboard.bat`**. On macOS/Linux, run
+   **`./start_dashboard.sh`**. The first run creates `.venv` and installs the requirements, then
+   opens <http://127.0.0.1:8787/>.
+3. **Paste your private key and Polymarket wallet address** on the setup screen. See
+   [Plugging in a wallet](#plugging-in-a-wallet-live-mode) for where to find them. Use a dedicated
+   wallet with only money you can afford to lose.
+4. **Choose Paper or Live.** Paper is the default and places no real orders. Live requires typing
+   `GO LIVE` and ticking *"I understand this uses real money"*.
+5. Set the starter limits and click **Save & Start**. You land on the live overview.
+
+You can also click *"Skip, explore in paper mode"* to try the bot without a wallet.
+
+![First-run setup](dashboard/screenshots/onboarding.png)
+
+> 🔐 **Security:** your private key is written **only** to the local `.env` file in this folder
+> (owner-only permissions where the OS supports it). `.env` is in `.gitignore`, so it is never committed.
+> The dashboard never displays, logs or returns the key after you save it, accepts wallet changes
+> only from this computer (127.0.0.1), and doesn't keep a backup copy of it. Anyone who gets the key
+> controls the wallet, so don't share `.env` and don't run this on a shared or untrusted computer.
+
+> ⚠️ With the default sizing (`MAX_POSITION_PCT=0.02`) and Polymarket's 5-share minimum order, the bot
+> needs roughly a **$250+ bankroll** before it can place a trade. Smaller accounts will just see skips.
+
+## Manual setup (without the launcher)
 
 **Windows (PowerShell or cmd)**
 ```bat
@@ -41,8 +72,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` to taste. The defaults are paper mode with no keys needed. **Never commit `.env`**
-(it's in `.gitignore`).
+Edit `.env` by hand, or let the dashboard's setup screen fill it in. The defaults are paper mode
+with no keys needed. **Never commit `.env`** (it's in `.gitignore`).
 
 ## Running the bot
 
@@ -70,9 +101,10 @@ Outputs go to `data/`:
 
 ![Dashboard overview](dashboard/screenshots/overview.png)
 
-**Windows:** double-click **`start_dashboard.bat`** (or run it from a terminal in the bot folder).
-It activates `.venv`, installs the dashboard packages if they're missing, starts the server and
-opens <http://127.0.0.1:8787/>. Close the window to stop the dashboard; the bot keeps running.
+**Windows:** double-click **`start_dashboard.bat`**. **macOS/Linux:** `./start_dashboard.sh`.
+On first run it creates `.venv` and installs `requirements.txt`, then starts the server and opens
+<http://127.0.0.1:8787/>. Close the window (or Ctrl+C) to stop the dashboard; the bot keeps running.
+If `.env` is missing or has no key or address, the dashboard shows the first-run setup screen.
 
 **Any OS:**
 ```bash
@@ -107,10 +139,13 @@ Safety:
 - Binds to **127.0.0.1** only. Binding elsewhere (`--host`) is refused unless `DASHBOARD_TOKEN` is set.
 - Set `DASHBOARD_TOKEN` (env or `.env`) to require a token for every control/settings call.
 - The private key, wallet address, API keys and `LIVE_TRADING_CONFIRM` are **never** returned or editable.
-- Switching to live needs you to type `GO LIVE`, and `.env` must already contain
-  `LIVE_TRADING_CONFIRM=I_UNDERSTAND_THIS_USES_REAL_MONEY`, which you add by hand. The dashboard never writes it.
+- Switching to live (on the setup screen or in Settings) needs you to type `GO LIVE` **and** tick
+  *"I understand this uses real money"*. Only then does the dashboard write `DRY_RUN=false` and
+  `LIVE_TRADING_CONFIRM=I_UNDERSTAND_THIS_USES_REAL_MONEY`. Switching back to paper during setup clears it.
+- Settings → **Wallet** shows only the masked address and "key set: yes", with Replace key and Remove key.
+- Wallet setup endpoints only accept requests from 127.0.0.1, whatever `--host` is set to.
 - Control calls must be same-origin JSON requests, so other websites can't trigger them.
-- The previous `.env` is kept as `.env.bak` (git-ignored) on every save.
+- `.env` is rewritten atomically with owner-only permissions (chmod 600 where supported). No backup copy is kept, so the key exists only in `.env`.
 
 The dashboard detects a bot that was started outside it (e.g. from a terminal) and can stop it too.
 

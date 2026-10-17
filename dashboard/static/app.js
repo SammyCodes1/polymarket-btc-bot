@@ -6,10 +6,14 @@ function dash() {
     positions: [], unrealized: 0, stats: {}, statsMode: 'auto', trades: [], tradesTotal: 0,
     decisions: [], showNoise: false, logLines: [], logFollow: true, logFilter: '',
     form: {}, modal: { open: false }, toasts: [], chart: null,
+    setup: { needs_setup: false, starter: {} }, needsSetup: false, setupSkipped: localStorage.getItem('setupSkipped') === '1',
+    setupForm: { private_key: '', wallet_address: '', showKey: false, mode: 'paper', live_confirmation: '', live_ack: false, settings: {} },
+    wallet: { replacing: false, key: '', addr: '', show: false },
     token: localStorage.getItem('dashToken') || '',
     tzLabel: (() => { try { return new Intl.DateTimeFormat([], { timeZoneName: 'short' }).formatToParts(new Date()).find(p => p.type === 'timeZoneName').value; } catch { return 'local time'; } })(),
 
     async init() {
+      await this.loadSetup();
       await this.loadConfig();
       this.refreshAll();
       setInterval(() => this.refreshFast(), 4000);
@@ -36,6 +40,7 @@ function dash() {
           this.api(`/api/decisions?limit=80&interesting=${!this.showNoise}`), this.api('/api/log?lines=200')]);
         this.offline = false;
         this.proc = s.process; this.cfg.mode = s.mode; this.cfg.live_armed = s.live_armed;
+        if (s.needs_setup !== this.needsSetup) { this.needsSetup = s.needs_setup; if (s.needs_setup) this.loadSetup(); }
         this.state = st; this.decisions = d.decisions; this.logLines = lg.lines;
         if (this.logFollow) this.$nextTick(() => { const b = document.getElementById('logbox'); if (b) b.scrollTop = b.scrollHeight; });
       } catch (e) { this.offline = true; }
@@ -57,9 +62,60 @@ function dash() {
         this.resetForm();
       } catch {}
     },
+    // ---------- first-run setup & wallet ----------
+    async loadSetup() {
+      try {
+        const st = await this.api('/api/setup'); this.setup = st; this.needsSetup = st.needs_setup;
+        if (!Object.keys(this.setupForm.settings).length) { const f = {}; for (const [k, v] of Object.entries(st.starter || {})) f[k] = v.value; this.setupForm.settings = f; }
+      } catch {}
+    },
+    showSetup() { return this.needsSetup && !(this.setupSkipped && this.setup.env_file_exists); },
+    isKey(v) { return /^(0x)?[0-9a-fA-F]{64}$/.test((v || '').trim()); },
+    isAddr(v) { return /^0x[0-9a-fA-F]{40}$/.test((v || '').trim()); },
+    keyOk() { return this.isKey(this.setupForm.private_key); },
+    addrOk() { return this.isAddr(this.setupForm.wallet_address); },
+    setupReady() { const f = this.setupForm; if (!this.keyOk() || !this.addrOk()) return false;
+      return f.mode === 'paper' || (f.live_confirmation.trim() === 'GO LIVE' && f.live_ack); },
+    async saveSetup() {
+      const f = this.setupForm;
+      const body = { private_key: f.private_key.trim(), wallet_address: f.wallet_address.trim(), mode: f.mode, settings: f.settings, start: true };
+      if (f.mode === 'live') { body.live_confirmation = f.live_confirmation.trim(); body.live_ack = f.live_ack === true; }
+      this.busy = true;
+      try {
+        const r = await this.post('/api/setup', body);
+        this.setupForm.private_key = ''; this.setupForm.showKey = false; this.setupForm.live_confirmation = '';
+        this.needsSetup = r.needs_setup; this.setupSkipped = false; localStorage.removeItem('setupSkipped');
+        await this.loadSetup(); await this.loadConfig(); this.tab = 'overview'; window.scrollTo(0, 0);
+        if (r.started) this.toast(`Saved. Bot started in ${r.mode === 'LIVE' ? 'LIVE' : 'paper'} mode.`);
+        else this.toast('Saved, but the bot did not start: ' + (r.start_error || 'unknown error'), 'err');
+        await this.refreshAll();
+      } catch (e) { this.toast(e.message, 'err'); } finally { this.busy = false; }
+    },
+    async skipSetup() {
+      this.busy = true;
+      try {
+        if (!this.setup.env_file_exists) await this.post('/api/setup', { skip_wallet: true, mode: 'paper', settings: this.setupForm.settings, start: false });
+        this.setupSkipped = true; localStorage.setItem('setupSkipped', '1');
+        await this.loadSetup(); await this.loadConfig(); this.toast('Paper mode. Add your wallet any time in Settings → Wallet.');
+      } catch (e) { this.toast(e.message, 'err'); } finally { this.busy = false; }
+    },
+    async replaceKey() {
+      const body = { private_key: this.wallet.key.trim() }; if (this.wallet.addr.trim()) body.wallet_address = this.wallet.addr.trim();
+      const r = await this.act(() => this.post('/api/wallet/replace', body));
+      this.wallet = { replacing: false, key: '', addr: '', show: false };
+      if (r) { await this.loadConfig(); this.toast('Key saved' + (r.restart_needed ? '. Restart the bot to use it.' : '.')); }
+    },
+    async removeKey() {
+      const v = await this.confirm({ title: 'Remove private key', danger: true, ok: 'Remove key', phrase: 'REMOVE',
+        body: 'Deletes the key from .env and switches to paper mode. The bot must be stopped. Your funds stay in your Polymarket wallet.' });
+      if (!v) return;
+      const r = await this.act(() => this.post('/api/wallet/remove', { confirmation: 'REMOVE' }), 'Key removed');
+      if (r) { await this.loadConfig(); await this.loadSetup(); }
+    },
+    pendingCount() { return Object.keys((this.state && this.state.pending_redeem) || {}).length; },
     // ---------- controls ----------
-    confirm(o) { return new Promise(res => { this.modal = { open: true, input: '', ok: 'Confirm', danger: false, phrase: '', ...o, resolve: res }; if (o.phrase) this.$nextTick(() => this.$refs.phraseInput && this.$refs.phraseInput.focus()); }); },
-    modalOk() { if (this.modal.phrase && this.modal.input.trim().toUpperCase() !== this.modal.phrase) return; const r = this.modal.resolve; const v = this.modal.input; this.modal.open = false; r && r(v || true); },
+    confirm(o) { return new Promise(res => { this.modal = { open: true, input: '', ok: 'Confirm', danger: false, phrase: '', ack: '', acked: false, ...o, resolve: res }; if (o.phrase) this.$nextTick(() => this.$refs.phraseInput && this.$refs.phraseInput.focus()); }); },
+    modalOk() { if (this.modal.phrase && this.modal.input.trim().toUpperCase() !== this.modal.phrase) return; if (this.modal.ack && !this.modal.acked) return; const r = this.modal.resolve; const v = this.modal.input; this.modal.open = false; r && r(v || true); },
     toast(msg, kind = 'ok') { const id = Math.random(); this.toasts.push({ id, msg, kind }); setTimeout(() => this.toasts = this.toasts.filter(t => t.id !== id), 5000); },
     async act(fn, okMsg) { this.busy = true; try { const r = await fn(); if (okMsg) this.toast(okMsg); await this.refreshFast(); return r; } catch (e) { this.toast(e.message, 'err'); } finally { this.busy = false; } },
     async liveConfirm(verb) {
@@ -93,8 +149,9 @@ function dash() {
     isPaperForm() { return !(this.form.DRY_RUN === false || this.form.DRY_RUN === 'false'); },
     isDirty(k) { const s = this.cfg.editable[k]; if (!s) return false; if (s.type === 'bool') return (this.form[k] === true || this.form[k] === 'true') !== s.value; return String(this.form[k]) !== '' && Number(this.form[k]) !== Number(s.value); },
     dirtyCount() { return Object.keys(this.cfg.editable || {}).filter(k => this.isDirty(k)).length; },
-    hint(k) {
-      const v = Number(this.form[k]); if (isNaN(v)) return '';
+    hint(k) { return this.hintFor(k, this.form[k]); },
+    hintFor(k, raw) {
+      const v = Number(raw); if (raw === '' || raw == null || isNaN(v)) return '';
       if (/PRICE|BID/.test(k)) return Math.round(v * 100) + '¢';
       if (/PCT/.test(k)) return Math.round(v * 100) + '%';
       if (/SECS/.test(k)) return (v / 60).toFixed(1) + ' min';
@@ -107,8 +164,9 @@ function dash() {
       const body = { values, restart };
       if ('DRY_RUN' in values && !this.isPaperForm()) {
         const v = await this.confirm({ title: 'Switch to LIVE trading?', danger: true, ok: 'Switch to live', phrase: 'GO LIVE',
+          ack: 'I understand this uses real money and I can lose all of it.',
           body: 'The bot will trade <b>real money</b> from your wallet the next time it starts. You can lose the full amount you put at risk.' });
-        if (!v) return; body.live_confirmation = 'GO LIVE'; body.confirm_live = true;
+        if (!v) return; body.live_confirmation = 'GO LIVE'; body.live_ack = true; body.confirm_live = true;
       } else if (restart && this.cfg.mode === 'LIVE' && this.proc.running) {
         if (!(await this.liveConfirm('Restart'))) return; body.confirm_live = true;
       }
