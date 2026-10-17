@@ -152,6 +152,14 @@ class Config:
     stop_loss_pct: float = _env("STOP_LOSS_PCT", 0.60)
     thesis_exit_prob: float = _env("THESIS_EXIT_PROB", 0.0)       # exit if our side's probability drops below (0=off)
     force_exit_seconds: int = _env("FORCE_EXIT_SECONDS", 0)       # flatten this close to the end (0=hold to resolution)
+    # Hard stop as an absolute drop from the entry price, in cents (e.g. 15 = sell once bid <= entry-0.15).
+    # Fires before STOP_LOSS_PCT when it is the tighter of the two. 0 = off. Backtest (Sep 26-Oct 17 2026,
+    # /workspace/bt_improve): 10/15/20c stops all LOWERED P&L in both the train and test halves, so it is off.
+    fav_stop_drop_cents: float = _env("FAV_STOP_DROP_CENTS", 0.0)
+    # Time exit: close any open position that is not at take-profit once this many seconds remain, and never
+    # open a position with this little time left. 0 = off (hold to resolution). Backtest: 120/180/300s exits
+    # cost 0.12-0.40 $/trade (selling into thin late books), so it is off. FORCE_EXIT_SECONDS still works too.
+    fav_exit_seconds_left: int = _env("FAV_EXIT_SECONDS_LEFT", 0)
     slippage: float = _env("SLIPPAGE", 0.02)
 
     # --- risk controls ---
@@ -695,6 +703,8 @@ def entry_gates(cfg: "Config", *, duration: str, secs_left: float, elapsed: floa
     min_left = cfg.min_seconds_left_5m if duration == "5m" else cfg.min_seconds_left_15m
     if secs_left < min_left:
         return "skip:too_close_to_expiry", 0.0
+    if getattr(cfg, "fav_exit_seconds_left", 0) > 0 and secs_left <= cfg.fav_exit_seconds_left:
+        return "skip:inside_time_exit", 0.0
     if elapsed < cfg.min_elapsed_frac:
         return "skip:window_too_young", 0.0
     if ask - bid > cfg.max_spread:
@@ -739,6 +749,8 @@ def favorite_signal(cfg: "Config", *, duration: str, secs_left: float, up_bid: f
         return "skip:fav_duration", "", 0.0, 0.0, 0.0
     if not (cfg.fav_min_secs_left < secs_left <= cfg.fav_max_secs_left):
         return "skip:fav_time", "", 0.0, 0.0, 0.0
+    if getattr(cfg, "fav_exit_seconds_left", 0) > 0 and secs_left <= cfg.fav_exit_seconds_left:
+        return "skip:inside_time_exit", "", 0.0, 0.0, 0.0
     up_mid, down_mid = (up_bid + up_ask) / 2, (down_bid + down_ask) / 2
     side, bid, ask, mid = ("UP", up_bid, up_ask, up_mid) if up_mid >= down_mid else ("DOWN", down_bid, down_ask, down_mid)
     if ask - bid > cfg.max_spread:
@@ -1303,8 +1315,14 @@ def exit_reason(cfg: "Config", *, entry: float, bid: float, shares: float, cost_
     tp_price = max(tp_price, cfg.take_profit_min_bid)
     if bid >= tp_price and profit >= cfg.min_profit_usd:
         return "take_profit", f"bid={bid:.3f}>=tp={tp_price:.3f} pnl~{profit:+.2f}"
+    drop = getattr(cfg, "fav_stop_drop_cents", 0.0)
+    if drop > 0 and bid <= entry - drop / 100.0 + 1e-9:
+        return "hard_stop", f"bid={bid:.3f}<=entry-{drop:g}c={entry - drop / 100.0:.3f}"
     if cfg.stop_loss_pct > 0 and bid <= entry * (1 - cfg.stop_loss_pct):
         return "stop_loss", f"bid={bid:.3f}"
+    tx = getattr(cfg, "fav_exit_seconds_left", 0)
+    if tx > 0 and secs_left <= tx:
+        return "time_exit", f"{secs_left:.0f}s left<={tx}s"
     if cfg.force_exit_seconds > 0 and secs_left <= cfg.force_exit_seconds:
         return "pre_expiry_exit", f"{secs_left:.0f}s left"
     if cfg.thesis_exit_prob > 0 and p_side is not None and p_side < cfg.thesis_exit_prob:

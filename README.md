@@ -170,6 +170,8 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `MAX_TRADES_PER_DAY` | `20` | ✏️ | Entries per UTC day. |
 | `TAKE_PROFIT_MIN_BID` | `0.97` | ✏️ | Take profit once the bid reaches this. |
 | `STOP_LOSS_PCT` | `0.60` | ✏️ | Sell after losing this fraction of cost. |
+| `FAV_STOP_DROP_CENTS` | `0` (off) | read-only | Hard stop: sell once the bid is this many cents below entry (e.g. `15`). Fires before `STOP_LOSS_PCT` when tighter. |
+| `FAV_EXIT_SECONDS_LEFT` | `0` (off) | read-only | Time exit: sell any position not at take-profit with this many seconds left, and never enter with less time left. |
 | `DAILY_LOSS_LIMIT_PCT` | `0.05` | ✏️ | Halt for the UTC day after this loss. |
 | `MAX_DRAWDOWN_PCT` | `0.10` | ✏️ | Halt when bankroll falls this far below its peak (not auto-reset). |
 | `MAX_CONSECUTIVE_LOSSES` / `COOLDOWN_AFTER_LOSS_SECONDS` | `4` / `600` | read-only | Loss-streak halt and pause after a loss. |
@@ -178,6 +180,19 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `LOOP_SECONDS` / `SCAN_SECONDS` | `5` / `20` | read-only | Main loop and market rescan intervals. |
 | `DATA_DIR` | `./data` | — | Where the bot (and dashboard) read/write files. |
 | `DASHBOARD_TOKEN` / `DASHBOARD_PORT` | — / `8787` | — | Dashboard access token and port. |
+
+## Exit-rule backtest (Oct 2026): hard stop and time exit
+
+Re-tested on 2,069 resolved 15m windows (Sep 26 – Oct 17 2026), train = first 14 days, test = last ~7.5.
+Stops fill at the next observed bid minus 1¢ (minus 5¢ with ≤180 s left), not at the stop level.
+
+* `FAV_STOP_DROP_CENTS` 10 / 15 / 20 lowered P&L for every band tested, in both halves. At 85–95¢ the
+  P&L per trade fell from +$0.18 (hold) to about −$0.01 to −$0.03 (10–15¢ stop). Favorites that dip often recover,
+  and the stop sells them at the low.
+* `FAV_EXIT_SECONDS_LEFT` 120 / 180 / 300 cost $0.12–0.40 per trade. Books are thin near expiry.
+* Both rules ship **off** (0). They are there to cap the size of a single loss if you want that, at a cost in expectancy.
+* The 85–95¢ / 600–900 s / hold-to-resolution defaults were positive in both halves: +$0.21 train, +$0.14 test
+  per $4.80 trade, 93% win rate. Still not statistically proven. 70–75¢ was negative in the test half.
 
 ## Backtest findings (21 days, 8,063 resolved windows) — read before trading
 
