@@ -172,6 +172,13 @@ class Config:
     # treated as a glitch (no new peak, no drawdown halt) until it has persisted BANK_JUMP_WINDOW_SECONDS.
     bank_jump_pct: float = _env("BANK_JUMP_PCT", 0.30)
     bank_jump_window_seconds: int = _env("BANK_JUMP_WINDOW_SECONDS", 60)
+    # A move with no trade event bigger than BANK_FLOW_MIN_USD (and BANK_FLOW_MIN_PCT of the bankroll) is never
+    # trusted right away. If it persists BANK_JUMP_WINDOW_SECONDS it is booked as an external cash flow
+    # (deposit / withdrawal / manual activity): peak and day-start shift by the same amount, no drawdown halt.
+    bank_flow_min_usd: float = _env("BANK_FLOW_MIN_USD", 0.25)
+    bank_flow_min_pct: float = _env("BANK_FLOW_MIN_PCT", 0.03)
+    # The drawdown halt needs this many consecutive breaching checks (a single low read never halts).
+    drawdown_confirm_reads: int = _env("DRAWDOWN_CONFIRM_READS", 2)
 
     # --- news sources ---
     rss_feeds: str = _env(
@@ -1122,41 +1129,54 @@ def compute_bankroll(cash: float, positions: dict, pending: dict,
 
 
 class BankrollGuard:
-    """Sanity guard against bookkeeping glitches: a bankroll move of more than BANK_JUMP_PCT with no
-    trade/resolve event is not trusted (no new peak, no drawdown halt) until it has persisted for
-    BANK_JUMP_WINDOW_SECONDS. Trade events (open/close/resolve) are trusted immediately."""
+    """Sanity guard for bankroll moves that no trade/resolve event explains (cash-read glitches, a lagging
+    balance, deposits, withdrawals). Trade events are trusted immediately via note_event().
+    An unexplained move bigger than max(min_usd, min_pct * bankroll) is NOT trusted (no new peak, no drawdown
+    halt). If it reverts it was a glitch. If it persists for `window` seconds (and >= 2 reads) it is real but
+    NOT a trading loss/gain: observe() reports it in `self.flow` so the caller can shift the peak and day-start
+    baselines by that amount (a $3.50 withdrawal must never look like a 40% drawdown)."""
 
-    def __init__(self, pct: float, window: float) -> None:
+    def __init__(self, pct: float, window: float, min_usd: float = 0.25, min_pct: float = 0.03) -> None:
         self.pct, self.window = pct, window
+        self.min_usd, self.min_pct = min_usd, min_pct
         self.ref: Optional[float] = None
         self.anomaly_since: Optional[float] = None
+        self.anomaly_reads = 0
+        self.flow = 0.0          # external cash flow accepted on the last observe() call (0 if none)
 
     def note_event(self, delta: float) -> None:
         """A trade/resolve event moved our own bookkeeping by delta: that move is expected."""
         if self.ref is not None:
             self.ref += delta
 
+    def _tol(self, base: float) -> float:
+        return max(self.min_usd, min(self.min_pct, self.pct) * abs(base))
+
     def observe(self, bank: float, now: float) -> bool:
         """Returns True if this bankroll value can be trusted for peak/drawdown this tick."""
+        self.flow = 0.0
         if self.ref is None:
-            self.ref, self.anomaly_since = bank, None
+            self.ref, self.anomaly_since, self.anomaly_reads = bank, None, 0
             return True
-        base = max(abs(self.ref), 1e-9)
-        if abs(bank - self.ref) / base <= self.pct:
-            self.ref, self.anomaly_since = bank, None
+        delta = bank - self.ref
+        if abs(delta) <= self._tol(self.ref):
+            self.ref, self.anomaly_since, self.anomaly_reads = bank, None, 0
             return True
         first = self.anomaly_since is None
         if first:
             self.anomaly_since = now
-        if now - self.anomaly_since >= self.window:
-            log.warning("bankroll move %.2f -> %.2f persisted %.0fs; accepting it", self.ref, bank,
-                        now - self.anomaly_since)
-            self.ref, self.anomaly_since = bank, None
+        self.anomaly_reads += 1
+        if now - self.anomaly_since >= self.window and self.anomaly_reads >= 2:
+            log.warning("bankroll move %.2f -> %.2f (%+.2f) persisted %.0fs with no trade event: booking it as an "
+                        "external cash flow (deposit/withdrawal/manual activity), not a trading result; "
+                        "peak and day-start shift by the same amount", self.ref, bank, delta, now - self.anomaly_since)
+            self.flow = delta
+            self.ref, self.anomaly_since, self.anomaly_reads = bank, None, 0
             return True
         if first:      # log once per anomaly, not every 5s tick
-            log.warning("bankroll jumped %.2f -> %.2f (%+.0f%%) with no trade event; treating it as a bookkeeping "
-                        "glitch for up to %.0fs (no new peak, drawdown halt skipped)", self.ref, bank,
-                        100 * (bank - self.ref) / base, self.window)
+            base = max(abs(self.ref), 1e-9)
+            log.warning("bankroll jumped %.2f -> %.2f (%+.0f%%) with no trade event; not trusted for up to %.0fs "
+                        "(no new peak, drawdown halt skipped)", self.ref, bank, 100 * delta / base, self.window)
         return False
 
 
@@ -1193,8 +1213,17 @@ class Risk:
             return "kill switch file present"
         if self.s.realized_pnl_day <= -CFG.daily_loss_limit_pct * self.s.day_start_bankroll_usd:
             return f"daily loss limit hit ({self.s.realized_pnl_day:.2f})"
-        if bank_trusted and self.s.bankroll_usd <= self.s.peak_bankroll_usd * (1 - CFG.max_drawdown_pct):
-            return f"max drawdown hit (bankroll {self.s.bankroll_usd:.2f} vs peak {self.s.peak_bankroll_usd:.2f})"
+        breach = self.s.bankroll_usd <= self.s.peak_bankroll_usd * (1 - CFG.max_drawdown_pct)
+        if not bank_trusted:
+            pass                      # untrusted read: neither counts toward nor resets the confirmation
+        elif breach:
+            self.dd_hits = getattr(self, "dd_hits", 0) + 1
+            if self.dd_hits >= max(1, CFG.drawdown_confirm_reads):
+                return f"max drawdown hit (bankroll {self.s.bankroll_usd:.2f} vs peak {self.s.peak_bankroll_usd:.2f})"
+            log.warning("bankroll %.2f is %.0f%%+ below peak %.2f (read %d/%d before halting)", self.s.bankroll_usd,
+                        100 * CFG.max_drawdown_pct, self.s.peak_bankroll_usd, self.dd_hits, CFG.drawdown_confirm_reads)
+        else:
+            self.dd_hits = 0
         if self.s.consecutive_losses >= CFG.max_consecutive_losses:
             return f"{self.s.consecutive_losses} consecutive losses"
         return None
@@ -1343,7 +1372,8 @@ def save_close_results(results: list[dict]) -> None:
 class PositionManager:
     def __init__(self, state: State, risk: Risk, ex: Executor) -> None:
         self.s, self.risk, self.ex = state, risk, ex
-        self.guard = BankrollGuard(CFG.bank_jump_pct, CFG.bank_jump_window_seconds)
+        self.guard = BankrollGuard(CFG.bank_jump_pct, CFG.bank_jump_window_seconds,
+                                   CFG.bank_flow_min_usd, CFG.bank_flow_min_pct)
         self.balances: dict = {}      # token_id -> on-chain shares from the last refresh (live only)
         self.bank_trusted = True
         self.last_exit: dict = {}     # details of the most recent _close() fill (for manual-close results)
@@ -1373,11 +1403,12 @@ class PositionManager:
         if cash is not None:
             self.s.cash_usd = cash
         if self.ex.client is not None:
-            for pos in self.s.positions.values():
+            for pos in list(self.s.positions.values()):
                 if pos.end_ts <= now:
                     if pos.cash_at_end is None:
                         pos.cash_at_end = self.s.cash_usd
                     self.balances[pos.token_id] = self.ex.token_balance(pos.token_id)
+                    self._maybe_close_redeemed(pos, now)
             for key, e in list(self.s.pending_redeem.items()):
                 bal = self.ex.token_balance(e["token_id"])
                 self.balances[e["token_id"]] = bal
@@ -1386,11 +1417,36 @@ class PositionManager:
         bank, parts = compute_bankroll(self.s.cash_usd, self.s.positions, self.s.pending_redeem, self.balances, now)
         self.s.bankroll_usd = bank
         self.bank_trusted = self.guard.observe(bank, now)
+        if self.guard.flow:
+            flow = self.guard.flow
+            old_peak, old_day = self.s.peak_bankroll_usd, self.s.day_start_bankroll_usd
+            self.s.peak_bankroll_usd = max(0.0, old_peak + flow)
+            self.s.day_start_bankroll_usd = max(0.01, old_day + flow)
+            log.warning("external cash flow %+.2f: peak %.2f -> %.2f, day start %.2f -> %.2f", flow, old_peak,
+                        self.s.peak_bankroll_usd, old_day, self.s.day_start_bankroll_usd)
         if self.bank_trusted:
             self.s.peak_bankroll_usd = max(self.s.peak_bankroll_usd, bank)
         log.debug("bankroll %.2f = cash %.2f + open %.2f + pending_redeem %.2f (trusted=%s)", bank,
                   parts["cash"], parts["open"], parts["pending_redeem"], self.bank_trusted)
         return self.bank_trusted
+
+    def _maybe_close_redeemed(self, pos: Position, now: float) -> None:
+        """Live: Polymarket auto-redeems winners minutes before Gamma flips `closed`. A directional position
+        whose window ended, whose tokens are gone on-chain AND whose cash rose by ~its $1/share payout since
+        the window ended has been paid out: book it as a resolved win now (CLOSED reason=resolved_win, a
+        RESOLVE row in trades.csv, P&L = payout - cost). Otherwise it would sit in `positions` (worth $0,
+        blocking new entries via max-open-positions) until Gamma catches up."""
+        if pos.kind != "dir" or pos.cash_at_end is None:
+            return       # arb legs: both legs' tokens burn on redeem -> wait for Gamma's outcome instead
+        bal = self.balances.get(pos.token_id)
+        if bal is None or bal >= 1e-6:
+            return
+        if self.s.cash_usd - pos.cash_at_end >= 0.9 * pos.shares:
+            log.info("%s: tokens redeemed and cash rose by the $%.2f payout -> booking the win", pos.slug, pos.shares)
+            self.resolve(pos, 1.0, reason="resolved_win")
+            # The guard's reference still holds the position at cost; the payout that just landed in cash is
+            # this trade's result (payout - cost), not an unexplained jump.
+            self.guard.note_event(pos.shares - pos.cost_usd)
 
     def _maybe_clear_pending(self, key: str, e: dict, bal: Optional[float], now: float) -> None:
         """A pending winner is redeemed once cash rose by ~its payout, or its tokens have been gone for
@@ -1532,9 +1588,11 @@ class PositionManager:
             prices = [float(x) for x in json.loads(m["outcomePrices"])]
             outcomes = [o.lower() for o in json.loads(m["outcomes"])]
             p = prices[outcomes.index(pos.side.lower())]
-            # Paper only: Gamma can take 10+ minutes to flip `closed` after the window ends.
-            # Settle once the outcome is effectively decided (>=0.99 / <=0.01) a minute past the end.
-            if not CFG.live and not m.get("closed") and time.time() > pos.end_ts + 60 and (p >= 0.99 or p <= 0.01):
+            # Gamma can take 10+ minutes to flip `closed` (and UMA status stays empty) after the window ends,
+            # while Polymarket has already auto-redeemed. Settle once the outcome is effectively decided
+            # (>=0.99 / <=0.01) a minute past the end. Live winners whose tokens are still held go to
+            # pending_redeem (valued $1/share until the payout lands in cash), so nothing is double-counted.
+            if not m.get("closed") and now_ts() > pos.end_ts + 60 and (p >= 0.99 or p <= 0.01):
                 p = 1.0 if p >= 0.99 else 0.0
                 m["closed"] = True
             if m.get("closed") and p in (0.0, 1.0):
@@ -1542,9 +1600,12 @@ class PositionManager:
         except Exception as e:
             log.debug("resolution check %s: %s", pos.slug, e)
 
-    def resolve(self, pos: Position, p: float, condition_id: str = "") -> None:
+    def resolve(self, pos: Position, p: float, condition_id: str = "", reason: str = "") -> None:
         """Book a resolved position. Live winners whose tokens are still on-chain go to pending_redeem
         (still worth $1/share); if the tokens are already gone, the payout is already in the synced cash."""
+        if self.s.positions.get(pos.key) is not pos:
+            log.debug("resolve %s: already booked, ignoring", pos.key)
+            return          # idempotent: never book the same position twice
         pending = None
         payout = pos.shares * p
         if CFG.live and p == 1.0:
@@ -1564,7 +1625,10 @@ class PositionManager:
         append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "RESOLVE",
                                 "slug": pos.slug, "side": pos.side, "ok": True, "shares": pos.shares, "price": p,
                                 "usd": round(payout, 4), "fee": 0, "pnl": round(payout - pos.cost_usd, 4),
-                                "reason": "resolution", "note": "pending redeem" if pending else ""})
+                                "reason": reason or ("resolved_win" if p == 1.0 else "resolved_loss" if p == 0.0
+                                                     else "resolution"),
+                                "note": "pending redeem" if pending else ("already redeemed" if CFG.live and p == 1.0
+                                                                          else "")})
         pnl = payout - pos.cost_usd
 
         def mutate() -> None:
@@ -1575,7 +1639,8 @@ class PositionManager:
         self._event(mutate)
         self.risk.record_close(pnl)
         self.s.save()
-        log.info("CLOSED %s %s reason=resolved pnl=%+.2f bankroll=%.2f%s", pos.slug, pos.side, pnl,
+        why = reason or ("resolved_win" if p == 1.0 else "resolved_loss" if p == 0.0 else "resolved")
+        log.info("CLOSED %s %s reason=%s pnl=%+.2f bankroll=%.2f%s", pos.slug, pos.side, why, pnl,
                  self.s.bankroll_usd, " (payout pending redeem)" if pending else "")
         if pending is not None:
             self._maybe_redeem(now_ts())

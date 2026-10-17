@@ -39,9 +39,12 @@ class FakeClient:
         self.redeem_calls = 0
         self.redeem_ok = False
 
+    fill = ("4.71", "6.72857")
+
     def place_market_order(self, **kw):
         assert kw["side"] == "BUY"
-        return SimpleNamespace(ok=True, making_amount="4.71", taking_amount="6.72857", order_id="0xabc", status="matched")
+        return SimpleNamespace(ok=True, making_amount=self.fill[0], taking_amount=self.fill[1], order_id="0xabc",
+                               status="matched")
 
     def redeem_positions(self, condition_id):
         self.redeem_calls += 1
@@ -225,12 +228,12 @@ def test_glitch_guard_skips_halt_then_accepts():
     assert not tick(pm, risk, 14.0)
     assert approx(st.peak_bankroll_usd, 7.20)
     assert tick(pm, risk, 7.20)
-    # a persistent drop is accepted after the window and then halts
+    # a persistent unexplained drop (no trade event) is an external cash flow (withdrawal): accepted after the
+    # window, peak/day-start rebased by the same amount, NEVER a drawdown halt
     for _ in range(20):
         tick(pm, risk, 5.0)
-        if st.halted:
-            break
-    assert st.halted and st.halt_reason.startswith("max drawdown hit"), st.halt_reason
+    assert not st.halted, st.halt_reason
+    assert approx(st.peak_bankroll_usd, 5.0) and approx(st.bankroll_usd, 5.0)
 
 
 def test_open_with_lagging_cash_sync_does_not_inflate_peak():
@@ -286,6 +289,120 @@ def test_migration_keeps_real_drawdown_halt():
     assert st.halted
     bot.startup_migrations(st, reset_halt=True)      # --reset-halt
     assert not st.halted and st.halt_reason == "" and approx(st.peak_bankroll_usd, 4.0)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# 2026-10-17 22:45 incident: UP 6.633803 @0.71 ($4.80561 debited). Polymarket auto-redeemed $6.633803 at
+# 23:01:39 while Gamma still said closed=False / umaResolutionStatus=None; at 23:02:33 $3.50 pUSD left the
+# wallet (unwrap + withdrawal tx). Old code: position stuck in `positions` (blocking entries via
+# max-open-positions), peak 8.72 from the redeem, then the withdrawal was accepted as a 40% drawdown -> halt.
+CASH_BEFORE_2245, CASH_AFTER_BUY_2245, REDEEM_2245, WITHDRAW_2245 = 6.890095, 2.084485, 6.633803, 3.50
+
+
+def _open_2245(pm, ex):
+    ex.client.fill = ("4.71", "6.633803")
+    sig = SimpleNamespace(market=market(), token_id=TOKEN, side="UP", ask=0.71, p_side=0.735, edge=0.011)
+    pm.open(sig, 4.80)
+    ex.client.token_bal[TOKEN] = 6.633803
+    return pm.s.positions[SLUG]
+
+
+def test_2245_redeemed_win_is_booked_and_withdrawal_never_halts():
+    st, risk, ex, pm = fresh(cash=CASH_BEFORE_2245)
+    pos = _open_2245(pm, ex)
+    assert approx(pos.cost_usd, 4.80561, 0.001), pos.cost_usd
+    tick(pm, risk, CASH_AFTER_BUY_2245)
+    assert approx(st.bankroll_usd, CASH_BEFORE_2245, 0.01)
+    Clock.t = END + 1
+    for _ in range(3):                                   # window over, tokens still held, Gamma unresolved
+        tick(pm, risk, CASH_AFTER_BUY_2245)
+        assert SLUG in st.positions and not st.halted
+    # 23:01:39 auto-redeem: tokens burned, cash +6.633803
+    ex.client.token_bal[TOKEN] = 0.0
+    cash = CASH_AFTER_BUY_2245 + REDEEM_2245             # 8.718288
+    assert tick(pm, risk, cash)
+    assert SLUG not in st.positions and not st.pending_redeem, (st.positions, st.pending_redeem)
+    assert approx(st.bankroll_usd, 8.718288, 0.001) and approx(st.peak_bankroll_usd, 8.718288, 0.001)
+    assert approx(st.realized_pnl_day, REDEEM_2245 - 4.80561, 0.001), st.realized_pnl_day   # +1.83
+    assert st.consecutive_losses == 0
+    rows = (Path(_TMP) / "trades.csv").read_text().splitlines()
+    assert "RESOLVE" in rows[-1] and "resolved_win" in rows[-1] and "1.8282" in rows[-1], rows[-1]
+    # position is gone -> a new window is not blocked by max-open-positions
+    assert sum(p.kind == "dir" for p in st.positions.values()) == 0
+    for _ in range(3):
+        tick(pm, risk, cash)                              # no double count after the booking
+        assert approx(st.bankroll_usd, 8.718288, 0.001)
+    # 23:02:33 $3.50 withdrawal: real, persistent, but not a trading loss
+    cash -= WITHDRAW_2245
+    for _ in range(30):                                   # 150s of ticks
+        tick(pm, risk, cash)
+        assert not st.halted, st.halt_reason
+    assert approx(st.bankroll_usd, 5.218288, 0.001)
+    assert approx(st.peak_bankroll_usd, 5.218288, 0.001), st.peak_bankroll_usd
+    assert approx(st.realized_pnl_day, 1.8282, 0.001)
+
+
+def test_2245_transient_low_reads_never_halt():
+    st, risk, ex, pm = fresh(cash=8.718288)
+    for low in (5.218288, 0.0, 1.0):                      # single bad reads between good ones
+        assert not tick(pm, risk, low)
+        assert not st.halted
+        assert tick(pm, risk, 8.718288)
+    for _ in range(5):                                     # a few bad reads in a row (< window)
+        tick(pm, risk, 0.5)
+        assert not st.halted
+    tick(pm, risk, 8.718288)
+    assert not st.halted and approx(st.peak_bankroll_usd, 8.718288, 0.001)
+
+
+def test_drawdown_needs_two_consecutive_trusted_reads():
+    st, risk, ex, pm = fresh(cash=10.0)
+    st.peak_bankroll_usd, st.bankroll_usd = 10.0, 8.5      # 15% below peak (e.g. after real trading losses)
+    st.realized_pnl_day = 0.0
+    assert risk.check_kill_switches(bank_trusted=True) is None          # read 1/2
+    assert risk.check_kill_switches(bank_trusted=False) is None         # untrusted read: no count
+    assert risk.check_kill_switches(bank_trusted=True).startswith("max drawdown hit")   # read 2/2
+    st.bankroll_usd = 9.5
+    assert risk.check_kill_switches(bank_trusted=True) is None
+    st.bankroll_usd = 8.5
+    assert risk.check_kill_switches(bank_trusted=True) is None          # counter was reset by the recovery
+
+
+def test_gamma_decided_but_not_closed_settles_live():
+    """Gamma outcomePrices ["0.995","0.005"], closed=False, UMA None, 60s+ past the end: settle in live too.
+    Tokens still held -> pending_redeem ($1/share until cash shows it); then the redeem clears it."""
+    st, risk, ex, pm = fresh(cash=CASH_BEFORE_2245)
+    pos = _open_2245(pm, ex)
+    tick(pm, risk, CASH_AFTER_BUY_2245)
+    Clock.t = END + 61
+    tick(pm, risk, CASH_AFTER_BUY_2245, dt=0)
+    ev = [{"markets": [{"outcomePrices": '["0.995", "0.005"]', "outcomes": '["Up", "Down"]', "closed": False,
+                        "umaResolutionStatus": None, "conditionId": COND}]}]
+    orig = bot.get_json
+    bot.get_json = lambda url, params=None, **kw: ev
+    try:
+        pm._settle_at_resolution(pos)
+    finally:
+        bot.get_json = orig
+    assert SLUG not in st.positions and SLUG in st.pending_redeem
+    assert approx(st.bankroll_usd, CASH_AFTER_BUY_2245 + REDEEM_2245, 0.001)
+    ex.client.token_bal[TOKEN] = 0.0
+    assert tick(pm, risk, CASH_AFTER_BUY_2245 + REDEEM_2245)
+    assert not st.pending_redeem and approx(st.bankroll_usd, 8.718288, 0.001) and not st.halted
+    assert approx(st.realized_pnl_day, 1.8282, 0.001)
+
+
+def test_deposit_does_not_fake_a_redeemed_win():
+    """Tokens still on-chain + a deposit >= payout: the position is NOT booked as won."""
+    st, risk, ex, pm = fresh(cash=CASH_BEFORE_2245)
+    _open_2245(pm, ex)
+    tick(pm, risk, CASH_AFTER_BUY_2245)
+    Clock.t = END + 1
+    tick(pm, risk, CASH_AFTER_BUY_2245, dt=0)
+    for _ in range(20):
+        tick(pm, risk, CASH_AFTER_BUY_2245 + 10.0)
+        assert not st.halted
+    assert SLUG in st.positions
 
 
 if __name__ == "__main__":
