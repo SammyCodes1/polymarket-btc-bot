@@ -123,6 +123,20 @@ class Config:
     fav_min_price: float = _env("FAV_MIN_PRICE", 0.85)       # favorite's mid must be >= this ...
     fav_max_price: float = _env("FAV_MAX_PRICE", 0.95)       # ... and < this
     fav_edge_est: float = _env("FAV_EDGE_EST", 0.015)        # assumed edge over mid for sizing (≈half of measured)
+    # --- entry mode (favorite strategy) ---
+    # market: FOK taker buy at the ask (pays the taker fee). limit: rest a post-only GTC/GTD BUY at
+    # mid - LIMIT_OFFSET (maker, no fee) and wait for sellers; unfilled remainder is cancelled. See README.
+    entry_mode: str = _env("ENTRY_MODE", "market")
+    limit_offset: float = _env("LIMIT_OFFSET", 0.01)                    # bid = mid - offset, rounded down to tick
+    limit_cancel_secs_left: int = _env("LIMIT_CANCEL_SECS_LEFT", 600)   # cancel the rest at/below this many s left
+    limit_cancel_out_of_band: bool = _env("LIMIT_CANCEL_OUT_OF_BAND", True)  # cancel if the favorite leaves the band
+    limit_reprice_cents: float = _env("LIMIT_REPRICE_CENTS", 1.0)       # re-quote when mid moves more than this ...
+    limit_max_reprices: int = _env("LIMIT_MAX_REPRICES", 2)             # ... at most this many times (0 = never)
+    limit_post_only: bool = _env("LIMIT_POST_ONLY", True)
+    # Paper fill model for resting bids (conservative): a fill needs the book to cross our price (best ask <= bid)
+    # or a print THROUGH our price (sell below it, or a complementary buy above 1 - bid). Prints exactly AT our
+    # price fill only this fraction of their size (queue ahead of us); 0 = never.
+    paper_at_price_fill_frac: float = _env("PAPER_AT_PRICE_FILL_FRAC", 0.0)
     # complete-set arbitrage: buy Up+Down when both asks + fees < $1 - ARB_MIN_EDGE
     arb_enabled: bool = _env("ARB_ENABLED", True)
     arb_min_edge: float = _env("ARB_MIN_EDGE", 0.01)
@@ -202,7 +216,7 @@ class Config:
     # --- pre-trade news & sentiment gate (favorite strategy) ---
     # Before every favorite buy: UP only if fresh news is bullish, DOWN only if bearish, otherwise skip.
     # Fails closed: stale / thin / unreachable news => no order. See README "News gate".
-    news_gate: bool = _env("NEWS_GATE", True)
+    news_gate: bool = _env("NEWS_GATE", False)     # off by default (unproven; Sammy's call)
     news_gate_threshold: float = _env("NEWS_GATE_THRESHOLD", 0.10)      # |score| needed for bullish/bearish
     news_gate_min_relevant: int = _env("NEWS_GATE_MIN_RELEVANT", 5)     # relevant headlines in the window
     news_gate_min_scored: int = _env("NEWS_GATE_MIN_SCORED", 2)         # ... of which carry a non-zero score
@@ -1203,6 +1217,45 @@ class Executor:
         except Exception as e:
             return False, str(e)
 
+    # ---- resting limit orders (ENTRY_MODE=limit) ----
+    def post_limit_buy(self, token_id: str, price: float, shares: float, expiration: Optional[int] = None) -> tuple[bool, str, str]:
+        """Returns (ok, order_id, note). Paper: always accepted (the fill model decides later)."""
+        if self.client is None:
+            return True, f"paper-{token_id[-6:]}-{int(now_ts() * 1000)}", "paper resting bid"
+        try:
+            kw: dict[str, Any] = dict(token_id=token_id, price=f"{price:.4f}".rstrip("0").rstrip("."),
+                                      size=f"{shares:.2f}", side="BUY", post_only=CFG.limit_post_only)
+            if expiration:
+                kw["expiration"] = int(expiration)
+            resp = self.client.place_limit_order(**kw)
+        except Exception as e:
+            return False, "", f"order error: {e}"
+        if not getattr(resp, "ok", False):
+            return False, "", f"rejected {getattr(resp, 'code', '')}: {getattr(resp, 'message', '')}"
+        return True, str(resp.order_id), f"live {getattr(resp, 'status', '')}"
+
+    def order_matched(self, order_id: str) -> tuple[Optional[float], str]:
+        """Live: (size_matched, status) for an order; (None, err) if it can't be read."""
+        if self.client is None:
+            return None, "paper"
+        try:
+            o = self.client.get_order(order_id=order_id)
+            return float(o.size_matched), str(o.status)
+        except Exception as e:
+            return None, f"get_order failed: {e}"
+
+    def cancel(self, order_id: str) -> tuple[bool, str]:
+        if self.client is None:
+            return True, "paper cancel"
+        try:
+            r = self.client.cancel_order(order_id=order_id)
+            if order_id in tuple(getattr(r, "canceled", ()) or ()):
+                return True, "canceled"
+            nc = dict(getattr(r, "not_canceled", {}) or {})
+            return False, f"not canceled: {nc.get(order_id, nc)}"
+        except Exception as e:
+            return False, f"cancel error: {e}"
+
     @staticmethod
     def _walk(levels: list, qty: float, by_usd: bool, limit: float, is_buy: bool) -> tuple[float, float]:
         """Return (shares, notional) fillable up to qty (USD for buys, shares for sells) within limit."""
@@ -1282,6 +1335,63 @@ class Executor:
         return Fill(True, sold, px, got - fee, fee, resp.order_id, f"live {resp.status}")
 
 
+def limit_bid_price(cfg: "Config", *, mid: float, best_ask: float, tick: float) -> float:
+    """Pure: resting bid = mid - offset, rounded DOWN to the tick, never at/above the ask (post-only would be
+    rejected) and never above FAV_MAX_PRICE."""
+    tick = tick or 0.01
+    px = min(mid - cfg.limit_offset, best_ask - tick, cfg.fav_max_price)
+    px = math.floor(px / tick + 1e-9) * tick
+    return round(max(tick, px), 4)
+
+
+def limit_order_shares(usd: float, price: float, min_shares: float) -> float:
+    """Pure: shares for a USD budget at price (2 dp, rounded down); 0 if below the market's minimum size."""
+    sh = math.floor(usd / price * 100 + 1e-9) / 100 if price > 0 else 0.0
+    return sh if sh >= min_shares else 0.0
+
+
+def fetch_recent_trades(condition_id: str, limit: int = 300) -> list:
+    """Public data-api prints (taker side) for one market, newest first. Used by the paper fill model."""
+    d = get_json("https://data-api.polymarket.com/trades",
+                 {"market": condition_id, "limit": limit, "takerOnly": "true"})
+    return d if isinstance(d, list) else []
+
+
+def paper_fill_qty(cfg: "Config", o: "PendingOrder", book: Optional["Book"], trades: list,
+                   now: float) -> tuple[float, str]:
+    """Pure conservative paper fill model for a resting BUY at o.price. Returns (shares, why).
+    - book crossed: asks at/below our bid would have traded with us -> fill up to that size;
+    - prints THROUGH our price since we posted: sells of our token below our bid, or buys of the
+      complementary token above 1 - bid (those match against our bid via minting) -> fill up to their size;
+    - prints exactly AT our price: only PAPER_AT_PRICE_FILL_FRAC of their size (queue ahead of us)."""
+    remaining = max(0.0, o.size - o.filled)
+    if remaining <= 0:
+        return 0.0, "done"
+    q, why = 0.0, []
+    if book and book.asks and book.best_ask <= o.price + 1e-9:
+        crossed = sum(sz for px, sz in book.asks if px <= o.price + 1e-9)
+        q += crossed
+        why.append(f"book crossed ask={book.best_ask:.3f} sz={crossed:.1f}")
+    seen = set(o.seen_tx)
+    for t in trades:
+        ts = float(t.get("timestamp", 0))
+        if ts <= max(o.posted_at, 0) or ts < o.last_trade_ts:
+            continue
+        key = f"{t.get('transactionHash', '')}:{t.get('asset', '')}:{t.get('size', '')}"
+        if key in seen:
+            continue
+        px, sz, side, asset = float(t.get("price", 0)), float(t.get("size", 0)), t.get("side", ""), t.get("asset", "")
+        if asset == o.token_id and side == "SELL" and px < o.price - 1e-9:
+            q += sz; why.append(f"sell@{px:.3f}<bid")
+        elif asset == o.other_token_id and side == "BUY" and px > 1 - o.price + 1e-9:
+            q += sz; why.append(f"opp-buy@{px:.3f}")
+        elif cfg.paper_at_price_fill_frac > 0 and ((asset == o.token_id and side == "SELL" and abs(px - o.price) < 1e-9)
+                                                   or (asset == o.other_token_id and side == "BUY"
+                                                       and abs(px - (1 - o.price)) < 1e-9)):
+            q += sz * cfg.paper_at_price_fill_frac; why.append(f"at-price@{px:.3f}x{cfg.paper_at_price_fill_frac}")
+    return round(min(remaining, q), 4), "; ".join(why[:4])
+
+
 # =============================================================================
 # SECTION 7: RISK CONTROLS   (defined before position management, which uses it)
 # =============================================================================
@@ -1305,6 +1415,32 @@ class Position:
     @property
     def key(self) -> str:
         return self.slug if self.kind == "dir" else f"{self.slug}:arb:{self.side}"
+
+
+@dataclass
+class PendingOrder:
+    """A resting limit BUY (ENTRY_MODE=limit). Fills are booked into State.positions as they happen."""
+    slug: str
+    duration: str
+    side: str
+    token_id: str
+    other_token_id: str
+    condition_id: str
+    price: float
+    size: float                   # shares ordered (current quote)
+    filled: float = 0.0           # shares filled on the CURRENT quote
+    total_filled: float = 0.0     # shares filled across all quotes in this window
+    order_id: str = ""
+    posted_at: float = 0.0
+    end_ts: float = 0.0
+    start_ts: float = 0.0
+    fee_rate: float = 0.0
+    tick: float = 0.01
+    mid_at_post: float = 0.0
+    reprices: int = 0
+    target_shares: float = 0.0    # shares wanted in total this window
+    last_trade_ts: float = 0.0    # paper: newest data-api print already examined
+    seen_tx: list = field(default_factory=list)
 
 
 @dataclass
@@ -1332,6 +1468,8 @@ class State:
     pending_redeem: dict = field(default_factory=dict)
     # slugs the user closed by hand from the dashboard: never re-entered (directional or arb)
     manual_closed_slugs: list = field(default_factory=list)
+    # slug -> PendingOrder: resting limit entries (ENTRY_MODE=limit)
+    pending_orders: dict = field(default_factory=dict)
 
     def save(self) -> None:
         tmp = STATE_FILE.with_suffix(".tmp")
@@ -1344,6 +1482,9 @@ class State:
         pos_fields = set(Position.__dataclass_fields__)
         raw["positions"] = {k: Position(**{f: x for f, x in v.items() if f in pos_fields}) if isinstance(v, dict) else v
                             for k, v in raw.get("positions", {}).items()}
+        po_fields = set(PendingOrder.__dataclass_fields__)
+        raw["pending_orders"] = {k: PendingOrder(**{f: x for f, x in v.items() if f in po_fields})
+                                 if isinstance(v, dict) else v for k, v in raw.get("pending_orders", {}).items()}
         known = set(cls.__dataclass_fields__)
         st = cls(**{k: v for k, v in raw.items() if k in known})
         if "cash_usd" not in raw:
@@ -1514,7 +1655,8 @@ class Risk:
             return 0.0, "closed manually from the dashboard (no re-entry this window)"
         if sig.market.slug in self.s.traded_slugs:
             return 0.0, "already traded this window"
-        if sum(p.kind == "dir" for p in self.s.positions.values()) >= CFG.max_open_positions:
+        if sum(p.kind == "dir" for p in self.s.positions.values()) + \
+                sum(1 for k in self.s.pending_orders if k not in self.s.positions) >= CFG.max_open_positions:
             return 0.0, "max open positions"
         bank = self.s.bankroll_usd
         total, net = self.exposure()
@@ -1777,6 +1919,170 @@ class PositionManager:
         self.s.trades_today += 1
         self.s.save()
         log.info("OPENED %s %s %.2f sh @ %.3f ($%.2f)", m.slug, sig.side, fill.shares, fill.avg_price, fill.usd)
+
+    # ---- resting limit entries (ENTRY_MODE=limit) ----
+    def open_limit(self, sig: Signal, usd: float) -> bool:
+        """Post a resting post-only BUY at mid - LIMIT_OFFSET for the favorite. Returns True if posted."""
+        m, book = sig.market, sig.book
+        price = limit_bid_price(CFG, mid=book.mid, best_ask=book.best_ask, tick=m.tick_size)
+        shares = limit_order_shares(min(usd, CFG.max_position_usd), price, m.min_order_size)
+        if shares <= 0:
+            log.info("limit entry %s skipped: $%.2f at %.3f is below the %.0f-share minimum", m.slug, usd, price,
+                     m.min_order_size)
+            return False
+        other = m.down_token if sig.token_id == m.up_token else m.up_token
+        o = PendingOrder(m.slug, m.duration, sig.side, sig.token_id, other, m.condition_id, price, shares,
+                         posted_at=now_ts(), end_ts=m.end_ts, start_ts=m.start_ts, fee_rate=m.fee_rate,
+                         tick=m.tick_size, mid_at_post=book.mid, target_shares=shares, last_trade_ts=now_ts())
+        if not self._post(o, m):
+            return False
+        self.s.pending_orders[m.slug] = o
+        self.s.traded_slugs.append(m.slug)       # one entry attempt per window (reprices reuse it)
+        self.s.save()
+        return True
+
+    def _post(self, o: PendingOrder, m: Optional[BtcMarket]) -> bool:
+        exp = int(max(now_ts() + 200, o.end_ts - CFG.limit_cancel_secs_left + 30))   # GTD safety net if we crash
+        ok, oid, note = self.ex.post_limit_buy(o.token_id, o.price, o.size, expiration=exp if CFG.live else None)
+        append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "LIMIT_POST",
+                                "slug": o.slug, "side": o.side, "ok": ok, "shares": round(o.size, 4),
+                                "price": round(o.price, 4), "usd": round(o.size * o.price, 4), "fee": 0,
+                                "pnl": "", "reason": f"mid={o.mid_at_post:.3f} reprice#{o.reprices}", "note": note})
+        if not ok:
+            log.warning("limit post failed %s: %s", o.slug, note)
+            return False
+        o.order_id, o.posted_at, o.filled = oid, now_ts(), 0.0
+        log.info("LIMIT POSTED %s %s %.2f sh @ %.3f (mid %.3f) id=%s", o.slug, o.side, o.size, o.price,
+                 o.mid_at_post, oid[:16])
+        return True
+
+    def _book_fill(self, o: PendingOrder, qty: float, why: str) -> None:
+        """Book qty shares filled at our limit price (maker: no fee) into the window's position."""
+        if qty <= 1e-9:
+            return
+        usd = qty * o.price
+        first = o.total_filled <= 1e-9
+        o.filled += qty
+        o.total_filled += qty
+
+        def mutate() -> None:
+            pos = self.s.positions.get(o.slug)
+            if pos is None:
+                self.s.positions[o.slug] = Position(o.slug, o.duration, o.side, o.token_id, qty, o.price, usd,
+                                                    now_ts(), o.end_ts, o.start_ts, o.fee_rate, o.order_id)
+            else:
+                pos.shares += qty
+                pos.cost_usd += usd
+                pos.entry_price = pos.cost_usd / pos.shares
+            self.s.cash_usd -= usd
+        self._event(mutate)
+        if first:
+            self.s.trades_today += 1
+        append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "LIMIT_FILL",
+                                "slug": o.slug, "side": o.side, "ok": True, "shares": round(qty, 4),
+                                "price": round(o.price, 4), "usd": round(usd, 4), "fee": 0, "pnl": "",
+                                "reason": f"filled {o.total_filled:.2f}/{o.target_shares:.2f}", "note": why[:200]})
+        log.info("LIMIT FILL %s %s +%.2f sh @ %.3f (%.2f/%.2f) %s", o.slug, o.side, qty, o.price, o.total_filled,
+                 o.target_shares, why[:120])
+        self.s.save()
+
+    def _sync_fills(self, o: PendingOrder, book: Optional[Book]) -> None:
+        if self.ex.client is not None:
+            matched, status = self.ex.order_matched(o.order_id)
+            if matched is not None and matched > o.filled + 1e-9:
+                self._book_fill(o, min(matched, o.size) - o.filled, f"live size_matched={matched} {status}")
+            return
+        try:
+            trades = fetch_recent_trades(o.condition_id)
+        except Exception as e:
+            log.debug("paper trades fetch failed %s: %s", o.slug, e)
+            trades = []
+        qty, why = paper_fill_qty(CFG, o, book, trades, now_ts())
+        seen = set(o.seen_tx)
+        for t in trades:
+            ts = float(t.get("timestamp", 0))
+            key = f"{t.get('transactionHash', '')}:{t.get('asset', '')}:{t.get('size', '')}"
+            if ts > o.posted_at and key not in seen:
+                seen.add(key)
+                o.seen_tx.append(key)
+                o.last_trade_ts = max(o.last_trade_ts, ts)
+        o.seen_tx = o.seen_tx[-500:]
+        self._book_fill(o, qty, why)
+
+    def _cancel_pending(self, o: PendingOrder, reason: str, keep: bool = False) -> bool:
+        """Cancel the resting remainder. keep=True leaves the PendingOrder in state (used for reprices)."""
+        ok, note = self.ex.cancel(o.order_id)
+        if not ok and self.ex.client is not None:
+            matched, status = self.ex.order_matched(o.order_id)
+            if matched is not None and matched > o.filled + 1e-9:
+                self._book_fill(o, min(matched, o.size) - o.filled, f"matched before cancel ({status})")
+            if status.upper() not in ("MATCHED", "CANCELED", "CANCELLED", "EXPIRED", "INVALID"):
+                log.warning("cancel failed for %s (%s); will retry", o.slug, note)
+                return False
+        elif self.ex.client is not None:      # catch fills that landed between our last poll and the cancel
+            matched, _ = self.ex.order_matched(o.order_id)
+            if matched is not None and matched > o.filled + 1e-9:
+                self._book_fill(o, min(matched, o.size) - o.filled, "matched before cancel")
+        append_csv(TRADES_CSV, {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "action": "LIMIT_CANCEL",
+                                "slug": o.slug, "side": o.side, "ok": True, "shares": round(o.size - o.filled, 4),
+                                "price": round(o.price, 4), "usd": "", "fee": 0, "pnl": "",
+                                "reason": reason, "note": f"filled {o.total_filled:.2f}/{o.target_shares:.2f}"})
+        log.info("LIMIT CANCEL %s (%s) filled %.2f/%.2f", o.slug, reason, o.total_filled, o.target_shares)
+        if not keep:
+            self.s.pending_orders.pop(o.slug, None)
+        self.s.save()
+        return True
+
+    def cancel_all_orders(self, reason: str) -> None:
+        for o in list(self.s.pending_orders.values()):
+            self._cancel_pending(o, reason)
+
+    def manage_orders(self, markets: dict, now: Optional[float] = None) -> None:
+        """Poll fills, then cancel / reprice resting entries."""
+        now = now_ts() if now is None else now
+        for o in list(self.s.pending_orders.values()):
+            book = get_book(o.token_id)
+            self._sync_fills(o, book)
+            if o.total_filled >= o.target_shares - 1e-6 or o.filled >= o.size - 1e-6:
+                log.info("LIMIT DONE %s filled %.2f/%.2f sh @ %.3f", o.slug, o.total_filled, o.target_shares, o.price)
+                self.s.pending_orders.pop(o.slug, None)
+                self.s.save()
+                continue
+            left = o.end_ts - now
+            if left <= CFG.limit_cancel_secs_left:
+                self._cancel_pending(o, f"{left:.0f}s left <= {CFG.limit_cancel_secs_left}")
+                continue
+            if self.s.halted:
+                self._cancel_pending(o, f"halted: {self.s.halt_reason}")
+                continue
+            if not book:
+                continue
+            mid = book.mid
+            if CFG.limit_cancel_out_of_band and not (CFG.fav_min_price <= mid < CFG.fav_max_price):
+                self._cancel_pending(o, f"mid {mid:.3f} left band {CFG.fav_min_price}-{CFG.fav_max_price}")
+                continue
+            if CFG.limit_max_reprices > 0 and o.reprices < CFG.limit_max_reprices and \
+                    abs(mid - o.mid_at_post) > CFG.limit_reprice_cents / 100 + 1e-9:
+                new_px = limit_bid_price(CFG, mid=mid, best_ask=book.best_ask, tick=o.tick)
+                if abs(new_px - o.price) < 1e-9:
+                    continue
+                if not self._cancel_pending(o, f"reprice: mid {o.mid_at_post:.3f}->{mid:.3f}", keep=True):
+                    continue
+                mkt = markets.get(o.slug)
+                min_sh = mkt.min_order_size if mkt else 5.0
+                pos = self.s.positions.get(o.slug)
+                budget = CFG.max_position_usd - (pos.cost_usd if pos else 0.0)
+                remaining = min(round(o.target_shares - o.total_filled, 2), limit_order_shares(budget, new_px, min_sh))
+                if remaining < min_sh:        # what's left is below the market minimum: stop quoting
+                    log.info("LIMIT %s: rest %.2f sh below minimum at %.3f; not re-quoting", o.slug, remaining, new_px)
+                    self.s.pending_orders.pop(o.slug, None)
+                    self.s.save()
+                    continue
+                o.target_shares = o.total_filled + remaining
+                o.price, o.size, o.mid_at_post, o.reprices = new_px, remaining, mid, o.reprices + 1
+                if not self._post(o, mkt):
+                    self.s.pending_orders.pop(o.slug, None)
+                self.s.save()
 
     def try_arbitrage(self, m: BtcMarket) -> None:
         """Complete-set arbitrage: if Up ask + Down ask + taker fees < $1 - ARB_MIN_EDGE, buy equal shares
@@ -2111,6 +2417,9 @@ def main() -> None:
     pm.refresh_bankroll(live_bal)
     startup_migrations(state, reset_halt=args.reset_halt)
     state.save()
+    log.info("entry_mode=%s%s news_gate=%s", CFG.entry_mode,
+             f" (offset {CFG.limit_offset}, cancel at {CFG.limit_cancel_secs_left}s, reprices {CFG.limit_max_reprices})"
+             if CFG.entry_mode == "limit" else "", CFG.news_gate)
     log.info("mode=%s bankroll=$%.2f (cash %.2f, %d open, %d pending redeem) peak=$%.2f halted=%s",
              "LIVE" if CFG.live else "PAPER (dry run)", state.bankroll_usd, state.cash_usd, len(state.positions),
              len(state.pending_redeem), state.peak_bankroll_usd, state.halted)
@@ -2145,6 +2454,7 @@ def main() -> None:
             if halt and not state.halted:
                 state.halted, state.halt_reason = True, halt
                 log.error("HALTING new entries: %s -- flattening positions", halt)
+                pm.cancel_all_orders(f"halt: {halt}")
                 pm.manage(by_slug, snap, news, flatten_all=True)
                 state.save()
             if args.flatten:
@@ -2153,6 +2463,7 @@ def main() -> None:
 
             pm.process_close_requests(by_slug)      # dashboard "Close" buttons (works while halted too)
             pm.manage(by_slug, snap, news)
+            pm.manage_orders(by_slug)                # resting limit entries: fills, cancels, reprices
 
             for m in markets:
                 if args.stop_after_trades and entries_this_run >= args.stop_after_trades:
@@ -2161,7 +2472,7 @@ def main() -> None:
                     continue   # only windows that are live right now
                 if m.seconds_left > 15 and not state.halted:
                     pm.try_arbitrage(m)
-                if m.slug in state.positions:
+                if m.slug in state.positions or m.slug in state.pending_orders:
                     continue
                 sig, verdict, d = decide(m, snap, news)
                 if sig is None:
@@ -2177,7 +2488,10 @@ def main() -> None:
                 log_decision("ENTER", d, f"usd={usd}")
                 log.info("ENTER %s %s p=%.3f ask=%.3f edge=%.3f size=$%.2f | %s",
                          m.slug, sig.side, sig.p_side, sig.ask, sig.edge, usd, " | ".join(sig.reasons))
-                pm.open(sig, usd)
+                if CFG.entry_mode == "limit" and CFG.strategy == "favorite":
+                    pm.open_limit(sig, usd)
+                else:
+                    pm.open(sig, usd)
                 entries_this_run += 1
                 if args.stop_after_trades and entries_this_run >= args.stop_after_trades:
                     break
@@ -2190,6 +2504,8 @@ def main() -> None:
         if args.max_loops and loops >= args.max_loops:
             break
         time.sleep(CFG.loop_seconds)
+    if state.pending_orders:
+        pm.cancel_all_orders("bot stopping")   # never leave resting orders behind
     state.save()
     if state.positions:
         log.warning("exiting with %d open position(s); they stay open. Run with --flatten to close.", len(state.positions))

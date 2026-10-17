@@ -170,8 +170,9 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `MAX_TRADES_PER_DAY` | `20` | ✏️ | Entries per UTC day. |
 | `TAKE_PROFIT_MIN_BID` | `0.97` | ✏️ | Take profit once the bid reaches this. |
 | `STOP_LOSS_PCT` | `0.60` | ✏️ | Sell after losing this fraction of cost. |
-| `NEWS_GATE` | `true` | read-only | Pre-trade news gate: UP only if news is bullish, DOWN only if bearish, else skip (fails closed). |
+| `NEWS_GATE` | `false` | read-only | Pre-trade news gate: UP only if news is bullish, DOWN only if bearish, else skip (fails closed). |
 | `NEWS_GATE_THRESHOLD` / `NEWS_GATE_MIN_RELEVANT` / `NEWS_GATE_MAX_AGE_SECONDS` | `0.10` / `5` / `300` | read-only | Label threshold, minimum relevant headlines, maximum refresh age. |
+| `ENTRY_MODE` / `LIMIT_OFFSET` / `LIMIT_CANCEL_SECS_LEFT` | `market` / `0.01` / `600` | read-only | Taker FOK entry, or a resting post-only limit bid at mid − offset (see "Limit entries"). |
 | `FAV_STOP_DROP_CENTS` | `0` (off) | read-only | Hard stop: sell once the bid is this many cents below entry (e.g. `15`). Fires before `STOP_LOSS_PCT` when tighter. |
 | `FAV_EXIT_SECONDS_LEFT` | `0` (off) | read-only | Time exit: sell any position not at take-profit with this many seconds left, and never enter with less time left. |
 | `DAILY_LOSS_LIMIT_PCT` | `0.05` | ✏️ | Halt for the UTC day after this loss. |
@@ -182,6 +183,35 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `LOOP_SECONDS` / `SCAN_SECONDS` | `5` / `20` | read-only | Main loop and market rescan intervals. |
 | `DATA_DIR` | `./data` | — | Where the bot (and dashboard) read/write files. |
 | `DASHBOARD_TOKEN` / `DASHBOARD_PORT` | — / `8787` | — | Dashboard access token and port. |
+
+## Limit entries (`ENTRY_MODE=limit`)
+
+The default `ENTRY_MODE=market` buys the favorite with a fill-or-kill order at the ask and pays the taker fee.
+`ENTRY_MODE=limit` instead rests a **post-only** BUY and waits for a seller.
+
+* **Price:** mid − `LIMIT_OFFSET` (default 1c), rounded down to the tick. It is never at or above the best ask
+  (post-only would be rejected) and never above `FAV_MAX_PRICE`.
+* **Size:** capped by the usual sizing and `MAX_POSITION_USD`. Orders below the market's minimum (5 shares) are not posted.
+* **Live orders:** a real CLOB limit order (`place_limit_order(..., post_only=True)`) with a GTD expiry as a
+  safety net if the bot crashes. Fills are read from `get_order().size_matched`.
+* **Fills:** booked as they arrive, at the limit price with no fee. Partial fills build up one position per window.
+* **Cancel:** the unfilled rest is cancelled when:
+  * the window reaches `LIMIT_CANCEL_SECS_LEFT` (600 s)
+  * the favorite's mid leaves the band (`LIMIT_CANCEL_OUT_OF_BAND`)
+  * the bot halts
+  * the bot stops
+* **Reprice:** re-quote when the mid moves more than `LIMIT_REPRICE_CENTS`, at most `LIMIT_MAX_REPRICES` times.
+  The new quote is resized to stay within `MAX_POSITION_USD`.
+* **One attempt per window.** A resting order counts toward `MAX_OPEN_POSITIONS`.
+* **Records:** state.json `pending_orders` holds resting orders. trades.csv rows are `LIMIT_POST`, `LIMIT_FILL`
+  and `LIMIT_CANCEL`. The dashboard exposes them at `/api/orders`.
+* **Paper fill model (conservative):** a resting bid fills only if one of these happens after it was posted:
+  * the book's best ask drops to our price or below (fill up to that size)
+  * a public print trades *through* our price: a sell of our token below our bid, or a buy of the other token
+    above 1 − bid (fill up to its size)
+
+  Prints exactly *at* our price count for `PAPER_AT_PRICE_FILL_FRAC` (default 0), because of the queue ahead of us.
+  The bot polls every `LOOP_SECONDS`, using data-api `/trades` for the market.
 
 ## News gate (pre-trade news & sentiment filter)
 
@@ -213,7 +243,7 @@ hold-to-settlement are unchanged.
   * the last successful refresh is older than 300 s
   * fewer than 2 feeds answered
   * there are fewer than 5 relevant headlines, or fewer than 2 scored ones
-* **Turn it off** with `NEWS_GATE=false`. Entry behaviour is then exactly as before.
+* **Off by default** (`NEWS_GATE=false`). Set `NEWS_GATE=true` to enable; with it off, entry behaviour is exactly as before.
 * **Evidence (Oct 2026, /workspace/bt_improve).** Historical headlines aren't available for a proper backtest.
   * BTC momentum (15–120 min) and Hyperliquid funding showed no correlation with outcomes beyond the noise level.
   * GDELT news tone (only 9 of 21 days were downloadable) gave a borderline, insignificant hint on the 82–92¢

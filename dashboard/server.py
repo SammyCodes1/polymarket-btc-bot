@@ -794,6 +794,14 @@ def api_state():
     return {"available": True, **st}
 
 
+@app.get("/api/orders")
+def api_orders():
+    """Resting limit entries (ENTRY_MODE=limit) from state.json."""
+    st = read_json(data_dir() / "state.json") or {}
+    orders = st.get("pending_orders") or {}
+    return {"orders": [{k: v for k, v in o.items() if k != "seen_tx"} for o in orders.values() if isinstance(o, dict)]}
+
+
 @app.get("/api/positions")
 def api_positions():
     st = read_json(data_dir() / "state.json") or {}
