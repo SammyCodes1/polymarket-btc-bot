@@ -30,3 +30,6 @@ Thumbs.db
 !data/backtest/
 data/backtest/*
 !data/backtest/report.txt
+
+# Vercel CLI link folder
+.vercel/
