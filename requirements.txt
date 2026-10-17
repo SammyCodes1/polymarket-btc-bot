@@ -1,0 +1,11 @@
+requests>=2.31
+feedparser>=6.0
+python-dotenv>=1.0
+# Live trading only (official unified Polymarket SDK; needs Python >= 3.11).
+# The legacy py-clob-client no longer works against production (CLOB V2, Apr 2026),
+# and py-clob-client-v2 is deprecated in favour of this package.
+polymarket-client>=0.13.0
+# Local web dashboard (dashboard/server.py)
+fastapi>=0.110
+uvicorn>=0.29
+psutil>=5.9

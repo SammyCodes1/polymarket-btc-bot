@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BTC Up/Down Bot · Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23f7931a'/><text x='16' y='23' font-size='20' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>₿</text></svg>" />
+<script src="/static/vendor/tailwind.js"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'Roboto', 'sans-serif'],
+                mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'] },
+  colors: { ink: { 950: '#07090d', 900: '#0b0f16', 850: '#0f141d', 800: '#131a25', 700: '#1c2533', 600: '#2a3647', 500: '#3b4a60' } }
+}}}
+</script>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="/static/vendor/chart.umd.min.js"></script>
+<script defer src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script defer src="/static/app.js"></script>
+<script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body class="h-full bg-ink-950 text-slate-200 font-sans antialiased" x-data="dash()" x-init="init()">
+<div class="bg-glow"></div>
+
+<!-- ============================== HEADER ============================== -->
+<header class="sticky top-0 z-30 border-b border-white/5 bg-ink-950/80 backdrop-blur-xl">
+  <div class="mx-auto max-w-[1400px] px-6 h-16 flex items-center gap-5">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="h-9 w-9 rounded-xl bg-gradient-to-br from-amber-400 to-orange-600 grid place-items-center text-white font-bold text-lg shadow-lg shadow-orange-500/20">₿</div>
+      <div class="leading-tight">
+        <div class="font-semibold text-[15px] tracking-tight text-white">BTC Up/Down Bot</div>
+        <div class="text-[11px] text-slate-500">Polymarket · 15m favorite strategy</div>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 ml-2">
+      <span class="pill" :class="modeClass()">
+        <span class="h-1.5 w-1.5 rounded-full" :class="cfg.mode==='LIVE' ? 'bg-rose-400 animate-pulse' : (cfg.mode==='PAPER' ? 'bg-amber-300' : 'bg-orange-400')"></span>
+        <span x-text="modeLabel()"></span>
+      </span>
+      <span class="pill" :class="proc.running ? 'pill-green' : 'pill-muted'">
+        <span class="relative flex h-2 w-2">
+          <span x-show="proc.running" class="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60 animate-ping"></span>
+          <span class="relative inline-flex h-2 w-2 rounded-full" :class="proc.running ? 'bg-emerald-400' : 'bg-slate-500'"></span>
+        </span>
+        <span x-text="proc.op ? (proc.op === 'stop' ? 'Stopping…' : 'Restarting…') : (proc.running ? 'Running' : 'Stopped')"></span>
+      </span>
+      <span class="hidden lg:inline text-xs text-slate-500" x-show="proc.running">
+        pid <span class="font-mono text-slate-400" x-text="proc.pid"></span> · up <span class="text-slate-400" x-text="dur(proc.uptime_s)"></span>
+        · heartbeat <span :class="heartbeatStale() ? 'text-amber-400' : 'text-slate-400'" x-text="ago(proc.last_log_at)"></span>
+      </span>
+    </div>
+
+    <nav class="ml-auto flex items-center gap-1 rounded-xl bg-white/[0.03] p-1 border border-white/5">
+      <button class="tab" :class="tab==='overview' && 'tab-on'" @click="tab='overview'">Overview</button>
+      <button class="tab" :class="tab==='settings' && 'tab-on'" @click="tab='settings'; loadConfig()">Settings</button>
+    </nav>
+
+    <div class="flex items-center gap-2">
+      <button class="btn btn-green" :disabled="proc.running || !!proc.op || busy" @click="startBot()">
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path d="M6.3 2.84A1.5 1.5 0 0 0 4 4.11v11.78a1.5 1.5 0 0 0 2.3 1.27l9.34-5.89a1.5 1.5 0 0 0 0-2.54L6.3 2.84Z"/></svg>Start</button>
+      <button class="btn btn-ghost" :disabled="!proc.running || !!proc.op || busy" @click="stopBot()">
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg>Stop</button>
+      <button class="btn btn-ghost" :disabled="!!proc.op || busy" @click="restartBot()">
+        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15.5 8A6 6 0 1 0 16 11" stroke-linecap="round"/><path d="M16 4v4h-4" stroke-linecap="round" stroke-linejoin="round"/></svg>Restart</button>
+      <div class="relative" x-data="{o:false}" @click.outside="o=false">
+        <button class="btn btn-ghost px-2" @click="o=!o" title="More controls">
+          <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><circle cx="4" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="16" cy="10" r="1.6"/></svg></button>
+        <div x-show="o" x-transition.opacity class="absolute right-0 mt-2 w-72 rounded-xl border border-white/10 bg-ink-850 shadow-2xl p-1.5 z-40" style="display:none">
+          <button class="menu-item" @click="o=false; forceKill()"><span class="text-rose-300">Force kill</span><span class="menu-sub">End the process now. Positions stay open.</span></button>
+          <button class="menu-item" @click="o=false; haltBot()"><span class="text-rose-300">Emergency halt &amp; flatten</span><span class="menu-sub">Creates the KILL file: the bot sells open positions and stops entering.</span></button>
+          <button class="menu-item" @click="o=false; clearHalt()"><span class="text-slate-200">Clear halt</span><span class="menu-sub">Remove KILL file and reset a halt (bot must be stopped).</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- Banners -->
+<div class="mx-auto max-w-[1400px] px-6 mt-4 space-y-2">
+  <template x-if="offline"><div class="banner banner-red">Can't reach the dashboard server. Is <span class="font-mono">python dashboard/server.py</span> still running?</div></template>
+  <template x-if="cfg.mode==='LIVE_NOT_ARMED'"><div class="banner banner-amber">DRY_RUN is off but LIVE_TRADING_CONFIRM isn't set in .env, so the bot will refuse to start. Add it to .env by hand, or switch back to paper mode.</div></template>
+  <template x-if="proc.kill_file_present"><div class="banner banner-red">KILL file present: the bot halts and flattens on its next loop and won't start until you use <b>Clear halt</b>.</div></template>
+  <template x-if="!proc.running && proc.last_stderr"><div class="banner banner-amber"><div class="font-medium mb-1">Last run ended with output on stderr:</div><pre class="font-mono text-[11px] whitespace-pre-wrap text-amber-100/80" x-text="proc.last_stderr"></pre></div></template>
+  <template x-if="proc.op_message && !proc.op"><div class="banner banner-slate flex items-center"><span x-text="proc.op_message"></span><button class="ml-auto text-slate-500 hover:text-slate-300" @click="proc.op_message=''">✕</button></div></template>
+</div>
+
+<main class="mx-auto max-w-[1400px] px-6 py-5 space-y-5">
+
+<!-- ============================== OVERVIEW ============================== -->
+<section x-show="tab==='overview'" class="space-y-5">
+
+  <!-- KPIs -->
+  <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+    <div class="kpi">
+      <div class="kpi-label">Bankroll</div>
+      <div class="kpi-value" x-text="state.available ? usd(state.bankroll_usd) : '—'"></div>
+      <div class="kpi-sub">peak <span x-text="state.available ? usd(state.peak_bankroll_usd) : '—'"></span></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Today's P&amp;L</div>
+      <div class="kpi-value" :class="pnlClass(state.realized_pnl_day)" x-text="state.available ? sgnUsd(state.realized_pnl_day) : '—'"></div>
+      <div class="kpi-sub"><span x-text="pctOf(state.realized_pnl_day, state.day_start_bankroll_usd)"></span> of day start · UTC day <span x-text="state.day || '—'"></span></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Total P&amp;L</div>
+      <div class="kpi-value" :class="pnlClass(state.realized_pnl_total)" x-text="state.available ? sgnUsd(state.realized_pnl_total) : '—'"></div>
+      <div class="kpi-sub">unrealized <span :class="pnlClass(unrealized)" x-text="positions.length ? sgnUsd(unrealized) : '—'"></span></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Win rate</div>
+      <div class="kpi-value" x-text="stats.win_rate==null ? '—' : (stats.win_rate*100).toFixed(0)+'%'"></div>
+      <div class="kpi-sub"><span class="text-emerald-400" x-text="stats.wins||0"></span>W · <span class="text-rose-400" x-text="stats.losses||0"></span>L · <span x-text="stats.entries||0"></span> entries</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Trades today</div>
+      <div class="kpi-value"><span x-text="state.available ? (state.trades_today ?? 0) : '—'"></span><span class="text-slate-500 text-lg font-medium"> / <span x-text="cfgVal('MAX_TRADES_PER_DAY')"></span></span></div>
+      <div class="mt-2 h-1.5 rounded-full bg-white/5 overflow-hidden"><div class="h-full rounded-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all" :style="`width:${Math.min(100, 100*(state.trades_today||0)/Math.max(1,cfgVal('MAX_TRADES_PER_DAY')||1))}%`"></div></div>
+    </div>
+    <div class="kpi" :class="state.halted ? 'ring-1 ring-rose-500/40 bg-rose-500/[0.06]' : ''">
+      <div class="kpi-label">Risk status</div>
+      <div class="kpi-value text-[22px]" :class="state.halted ? 'text-rose-400' : 'text-emerald-400'" x-text="!state.available ? '—' : (state.halted ? 'Halted' : 'Active')"></div>
+      <div class="kpi-sub truncate" :title="state.halt_reason" x-text="state.halted ? state.halt_reason : `${state.consecutive_losses||0} loss streak · DD limit ${pct(cfgVal('MAX_DRAWDOWN_PCT'))}`"></div>
+    </div>
+  </div>
+
+  <!-- Chart + positions -->
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
+    <div class="card xl:col-span-2">
+      <div class="card-head">
+        <div>
+          <div class="card-title">Cumulative realized P&amp;L</div>
+          <div class="card-sub"><span x-text="stats.closed||0"></span> closed trades · fees <span x-text="usd(stats.fees||0)"></span> · max drawdown <span x-text="sgnUsd(stats.max_drawdown||0)"></span></div>
+        </div>
+        <div class="flex items-center gap-1 rounded-lg bg-white/[0.03] p-0.5 border border-white/5 text-xs">
+          <template x-for="m in ['auto','LIVE','PAPER','ALL']" :key="m">
+            <button class="px-2.5 py-1 rounded-md" :class="statsMode===m ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-slate-200'" @click="statsMode=m; refreshStats()" x-text="m==='auto' ? 'Current' : m.charAt(0)+m.slice(1).toLowerCase()"></button>
+          </template>
+        </div>
+      </div>
+      <div class="relative h-[280px] px-4 pb-4">
+        <canvas id="pnlChart"></canvas>
+        <div x-show="(stats.series||[]).length < 2" class="empty absolute inset-0">
+          <svg class="h-8 w-8 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17l6-6 4 4 8-8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div>No closed trades yet. The curve appears after the first exit or resolution.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><div class="card-title">Open positions</div><div class="card-sub">Marked at the live CLOB best bid</div></div>
+        <span class="pill pill-muted" x-text="positions.length + ' / ' + (cfgVal('MAX_OPEN_POSITIONS') ?? '—')"></span>
+      </div>
+      <div class="px-4 pb-4 space-y-3">
+        <template x-for="p in positions" :key="p.key">
+          <div class="rounded-xl border border-white/5 bg-white/[0.02] p-4">
+            <div class="flex items-center gap-2">
+              <span class="side" :class="p.side==='UP' ? 'side-up' : 'side-down'" x-text="p.side==='UP' ? '▲ UP' : '▼ DOWN'"></span>
+              <span class="font-mono text-xs text-slate-400 truncate" x-text="p.slug"></span>
+              <a class="ml-auto text-slate-500 hover:text-sky-400" :href="'https://polymarket.com/event/'+p.slug" target="_blank" rel="noopener" title="Open on Polymarket">
+                <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M11 3h6v6M17 3l-8 8M8 5H4v11h11v-4" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+            </div>
+            <div class="mt-3 flex items-end justify-between">
+              <div>
+                <div class="text-2xl font-semibold tabular-nums" :class="pnlClass(p.unrealized_pnl)" x-text="p.unrealized_pnl==null ? '—' : sgnUsd(p.unrealized_pnl)"></div>
+                <div class="text-xs text-slate-500" x-text="p.unrealized_pct==null ? (p.quote_error || 'no quote') : sgnPct(p.unrealized_pct)+' unrealized'"></div>
+              </div>
+              <div class="text-right">
+                <div class="text-xs text-slate-500">window</div>
+                <div class="font-mono text-sm" :class="p.secs_left>0 ? 'text-slate-200' : (p.mark_source==='resolved' ? (p.mark>=0.5 ? 'text-emerald-300' : 'text-rose-300') : 'text-amber-300')" x-text="p.secs_left>0 ? clock(p.secs_left)+' left' : (p.mark_source==='resolved' ? (p.mark>=0.5 ? 'resolved · won' : 'resolved · lost') : 'awaiting resolution')"></div>
+                <div class="text-[10px] text-slate-500" x-show="p.secs_left<=0 && p.mark_source==='resolved'">bot settles it on its next loop</div>
+              </div>
+            </div>
+            <div class="mt-3 grid grid-cols-4 gap-2 text-xs">
+              <div class="stat"><div class="stat-l">Shares</div><div class="stat-v" x-text="num(p.shares,2)"></div></div>
+              <div class="stat"><div class="stat-l">Entry</div><div class="stat-v" x-text="cents(p.entry_price)"></div></div>
+              <div class="stat"><div class="stat-l">Mark</div><div class="stat-v" :title="p.mark_source" x-text="p.mark==null ? '—' : cents(p.mark)"></div></div>
+              <div class="stat"><div class="stat-l">Cost</div><div class="stat-v" x-text="usd(p.cost_usd)"></div></div>
+            </div>
+            <div class="mt-3" x-show="p.mark!=null">
+              <div class="relative h-1.5 rounded-full bg-white/5">
+                <div class="absolute top-0 h-1.5 w-px bg-slate-400" :style="`left:${p.entry_price*100}%`"></div>
+                <div class="absolute -top-0.5 h-2.5 w-2.5 -ml-1 rounded-full ring-2 ring-ink-900" :class="p.mark>=p.entry_price ? 'bg-emerald-400' : 'bg-rose-400'" :style="`left:${p.mark*100}%`"></div>
+                <div class="absolute top-0 h-1.5 w-px bg-emerald-500/60" :style="`left:${cfgVal('TAKE_PROFIT_MIN_BID')*100}%`" title="take profit"></div>
+              </div>
+              <div class="mt-1.5 flex justify-between text-[10px] text-slate-500"><span>0¢</span><span>TP <span x-text="cents(cfgVal('TAKE_PROFIT_MIN_BID'))"></span> · pays <span x-text="usd(p.max_payout)"></span> if it wins</span><span>$1</span></div>
+            </div>
+          </div>
+        </template>
+        <div x-show="!positions.length" class="empty py-12">
+          <svg class="h-8 w-8 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M8 12h8" stroke-linecap="round"/></svg>
+          <div>Flat. No open positions.</div>
+          <div class="text-[11px] text-slate-600">Next entry needs a 15m favorite at <span x-text="cents(cfgVal('FAV_MIN_PRICE'))"></span>–<span x-text="cents(cfgVal('FAV_MAX_PRICE'))"></span> with <span x-text="Math.round(cfgVal('FAV_MIN_SECS_LEFT')/60)"></span>–<span x-text="Math.round(cfgVal('FAV_MAX_SECS_LEFT')/60)"></span> min left.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trades + decisions -->
+  <div class="grid grid-cols-1 xl:grid-cols-5 gap-5">
+    <div class="card xl:col-span-3">
+      <div class="card-head">
+        <div><div class="card-title">Trade history</div><div class="card-sub"><span x-text="tradesTotal"></span> rows in trades.csv · newest first</div></div>
+      </div>
+      <div class="overflow-auto max-h-[420px]">
+        <table class="tbl">
+          <thead><tr><th>Time</th><th>Action</th><th>Market</th><th>Side</th><th class="r">Shares</th><th class="r">Price</th><th class="r">USD</th><th class="r">P&amp;L</th><th>Reason</th></tr></thead>
+          <tbody>
+            <template x-for="(t,i) in trades" :key="i">
+              <tr>
+                <td class="whitespace-nowrap text-slate-400" :title="t.time"><span x-text="fmtTime(t.time)"></span> <span x-show="t.mode==='PAPER'" class="ml-1 text-[10px] text-amber-300/70">paper</span></td>
+                <td><span class="act" :class="actClass(t)" x-text="t.action + (isFalse(t.ok) ? ' ✕' : '')"></span></td>
+                <td class="font-mono text-xs text-slate-400 whitespace-nowrap" x-text="shortSlug(t.slug)" :title="t.slug"></td>
+                <td><span class="text-xs font-semibold" :class="t.side==='UP' ? 'text-emerald-400' : 'text-rose-400'" x-text="t.side"></span></td>
+                <td class="r tabular-nums" x-text="num(t.shares,2)"></td>
+                <td class="r tabular-nums" x-text="cents(t.price)"></td>
+                <td class="r tabular-nums" x-text="usd(t.usd)"></td>
+                <td class="r tabular-nums font-medium" :class="pnlClass(t.pnl)" x-text="t.pnl==='' || t.pnl==null ? '' : sgnUsd(t.pnl)"></td>
+                <td class="text-xs text-slate-500 max-w-[160px] truncate" :title="t.reason + (t.note ? ' · '+t.note : '')" x-text="t.reason"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div x-show="!trades.length" class="empty py-14"><div>No trades yet.</div><div class="text-[11px] text-slate-600">Entries and exits show up here as soon as the bot writes them to trades.csv.</div></div>
+      </div>
+    </div>
+
+    <div class="card xl:col-span-2">
+      <div class="card-head">
+        <div><div class="card-title flex items-center gap-2">Decision feed <span class="relative flex h-1.5 w-1.5" x-show="proc.running"><span class="absolute h-full w-full rounded-full bg-sky-400 opacity-60 animate-ping"></span><span class="relative h-1.5 w-1.5 rounded-full bg-sky-400"></span></span></div>
+          <div class="card-sub">Every window the bot evaluated · repeats collapsed</div></div>
+        <label class="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+          <input type="checkbox" class="accent-sky-500" x-model="showNoise" @change="refreshDecisions()"> show timing skips
+        </label>
+      </div>
+      <div class="overflow-auto max-h-[420px] px-2 pb-3">
+        <template x-for="(d,i) in decisions" :key="i">
+          <div class="flex items-start gap-3 rounded-lg px-2.5 py-2 hover:bg-white/[0.02]">
+            <span class="mt-1.5 h-2 w-2 shrink-0 rounded-full" :class="verdictDot(d.verdict)"></span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span class="text-[13px] font-medium" :class="d.verdict==='ENTER' ? 'text-emerald-300' : 'text-slate-200'" x-text="verdictLabel(d.verdict)"></span>
+                <span x-show="d._repeat>1" class="text-[10px] rounded bg-white/5 px-1.5 py-px text-slate-400" x-text="'×'+d._repeat"></span>
+                <span class="ml-auto text-[11px] text-slate-500 whitespace-nowrap" x-text="fmtTime(d._last_time || d.time || d.ts)"></span>
+              </div>
+              <div class="mt-0.5 text-[11px] text-slate-500 font-mono truncate">
+                <span x-text="shortSlug(d.slug)"></span>
+                <template x-if="d.side"><span> · <span :class="d.side==='UP' ? 'text-emerald-400/80' : 'text-rose-400/80'" x-text="d.side"></span></span></template>
+                <template x-if="d.bid!=='' && d.bid!=null"><span> · <span x-text="cents(d.bid)"></span>/<span x-text="cents(d.ask)"></span></span></template>
+                <template x-if="d.edge!=='' && d.edge!=null"><span> · edge <span x-text="(+d.edge).toFixed(3)"></span></span></template>
+                <template x-if="d.secs_left!=='' && d.secs_left!=null"><span> · <span x-text="clock(+d.secs_left)"></span> left</span></template>
+              </div>
+              <div x-show="d.note" class="text-[11px] text-slate-500 truncate" x-text="d.note"></div>
+            </div>
+          </div>
+        </template>
+        <div x-show="!decisions.length" class="empty py-14"><div>No decisions logged yet.</div><div class="text-[11px] text-slate-600">Start the bot to see each window it evaluates.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">bot.log</div><div class="card-sub">Last <span x-text="logLines.length"></span> lines · secrets redacted</div></div>
+      <div class="flex items-center gap-3 text-xs text-slate-400">
+        <label class="flex items-center gap-2 cursor-pointer select-none"><input type="checkbox" class="accent-sky-500" x-model="logFollow"> follow</label>
+        <select x-model="logFilter" class="rounded-md bg-white/5 border border-white/10 px-2 py-1 text-xs">
+          <option value="">all levels</option><option value="WARNING|ERROR">warnings+</option><option value="ENTER|CLOSED|HALT">trades &amp; halts</option>
+        </select>
+      </div>
+    </div>
+    <div id="logbox" class="mx-4 mb-4 h-[260px] overflow-auto rounded-xl bg-black/40 border border-white/5 p-3 font-mono text-[11.5px] leading-relaxed">
+      <template x-for="(l,i) in filteredLog()" :key="i"><div class="whitespace-pre-wrap break-all" :class="logClass(l)" x-text="l"></div></template>
+      <div x-show="!logLines.length" class="text-slate-600">bot.log is empty or missing.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== SETTINGS ============================== -->
+<section x-show="tab==='settings'" class="space-y-5" style="display:none">
+  <div class="flex items-end justify-between">
+    <div>
+      <h2 class="text-xl font-semibold text-white tracking-tight">Strategy &amp; risk settings</h2>
+      <p class="text-sm text-slate-500 mt-1">Writes only these keys to <span class="font-mono text-slate-400" x-text="cfg.env_file || '.env'"></span>. Keys, wallet and secrets are never shown or edited here.</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="text-xs text-slate-500" x-show="dirtyCount()"><span class="text-amber-300" x-text="dirtyCount()"></span> unsaved change(s)</span>
+      <button class="btn btn-ghost" :disabled="!dirtyCount()" @click="resetForm()">Discard</button>
+      <button class="btn btn-ghost" :disabled="!dirtyCount() || busy" @click="saveConfig(false)">Save</button>
+      <button class="btn btn-primary" :disabled="!dirtyCount() || busy" @click="saveConfig(true)">Save &amp; restart</button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+    <template x-for="g in ['Strategy','Risk','Exits']" :key="g">
+      <div class="card">
+        <div class="card-head"><div class="card-title" x-text="g"></div></div>
+        <div class="px-5 pb-5 space-y-4">
+          <template x-for="k in keysIn(g)" :key="k">
+            <div>
+              <div class="flex items-center justify-between">
+                <label class="text-[13px] font-medium text-slate-200" :for="'f_'+k" x-text="cfg.editable[k].label"></label>
+                <span class="font-mono text-[10px] text-slate-600" x-text="k"></span>
+              </div>
+              <div class="mt-1.5 flex items-center gap-2">
+                <input :id="'f_'+k" type="number" class="field" :class="isDirty(k) && 'field-dirty'" :min="cfg.editable[k].min" :max="cfg.editable[k].max" :step="cfg.editable[k].step" x-model="form[k]">
+                <span class="text-xs text-slate-500 w-20 text-right" x-text="hint(k)"></span>
+              </div>
+              <div class="mt-1 text-[11px] text-slate-500 leading-snug" x-text="cfg.editable[k].help + ` Range ${cfg.editable[k].min}–${cfg.editable[k].max}.`"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+    <div class="card lg:col-span-1" :class="form.DRY_RUN===false || form.DRY_RUN==='false' ? 'ring-1 ring-rose-500/30' : ''">
+      <div class="card-head"><div><div class="card-title">Trading mode</div><div class="card-sub">Paper uses simulated fills; live spends real pUSD</div></div></div>
+      <div class="px-5 pb-5">
+        <div class="grid grid-cols-2 gap-2 rounded-xl bg-white/[0.03] p-1 border border-white/5">
+          <button id="modePaper" class="rounded-lg py-2.5 text-sm font-medium" :class="isPaperForm() ? 'bg-amber-400/15 text-amber-200 ring-1 ring-amber-400/30' : 'text-slate-400'" @click="form.DRY_RUN=true">Paper</button>
+          <button id="modeLive" class="rounded-lg py-2.5 text-sm font-medium" :class="!isPaperForm() ? 'bg-rose-500/15 text-rose-200 ring-1 ring-rose-500/30' : 'text-slate-400'" @click="form.DRY_RUN=false">Live</button>
+        </div>
+        <p class="mt-3 text-[12px] text-slate-500 leading-relaxed" x-show="!isPaperForm()">Switching to live asks you to type <span class="font-mono text-rose-300">GO LIVE</span>. The bot also needs <span class="font-mono">LIVE_TRADING_CONFIRM</span> in .env, which you add by hand. It's currently <b x-text="cfg.live_armed ? 'set' : 'not set'" :class="cfg.live_armed ? 'text-emerald-400' : 'text-amber-300'"></b>.</p>
+      </div>
+    </div>
+    <div class="card lg:col-span-2">
+      <div class="card-head"><div><div class="card-title">Other settings (read-only)</div><div class="card-sub">Change these in .env by hand</div></div></div>
+      <div class="px-5 pb-5 grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2">
+        <template x-for="(v,k) in cfg.display" :key="k">
+          <div class="flex items-center justify-between border-b border-white/[0.04] py-1.5"><span class="font-mono text-[11px] text-slate-500" x-text="k"></span><span class="font-mono text-[12px] text-slate-300" x-text="String(v)"></span></div>
+        </template>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="mx-auto max-w-[1400px] px-6 pb-8 text-[11px] text-slate-600 flex items-center gap-3">
+  <span>Local dashboard · times in <span x-text="tzLabel"></span> · refreshes every 4 s</span>
+  <span class="ml-auto">Trading is risky. Past results don't guarantee future returns.</span>
+</footer>
+
+<!-- Modal -->
+<div x-show="modal.open" class="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm" style="display:none" x-transition.opacity @keydown.escape.window="modal.open=false">
+  <div class="w-[460px] rounded-2xl border border-white/10 bg-ink-850 p-6 shadow-2xl" @click.outside="modal.open=false">
+    <div class="flex items-start gap-3">
+      <div class="h-9 w-9 shrink-0 rounded-full grid place-items-center" :class="modal.danger ? 'bg-rose-500/15 text-rose-300' : 'bg-sky-500/15 text-sky-300'">!</div>
+      <div>
+        <h3 class="text-base font-semibold text-white" x-text="modal.title"></h3>
+        <p class="mt-1.5 text-sm text-slate-400 leading-relaxed" x-html="modal.body"></p>
+      </div>
+    </div>
+    <template x-if="modal.phrase">
+      <div class="mt-4"><label class="text-xs text-slate-400">Type <span class="font-mono text-slate-200" x-text="modal.phrase"></span> to confirm</label>
+        <input class="field mt-1.5 font-mono" x-model="modal.input" @keydown.enter="modalOk()" x-ref="phraseInput"></div>
+    </template>
+    <div class="mt-6 flex justify-end gap-2">
+      <button class="btn btn-ghost" @click="modal.open=false">Cancel</button>
+      <button class="btn" :class="modal.danger ? 'btn-red' : 'btn-primary'" :disabled="modal.phrase && modal.input.trim().toUpperCase()!==modal.phrase" @click="modalOk()" x-text="modal.ok"></button>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div class="fixed bottom-5 right-5 z-50 space-y-2 w-[360px]">
+  <template x-for="t in toasts" :key="t.id">
+    <div class="rounded-xl border px-4 py-3 text-sm shadow-xl backdrop-blur" x-transition :class="t.kind==='err' ? 'border-rose-500/30 bg-rose-950/80 text-rose-100' : 'border-emerald-500/30 bg-emerald-950/80 text-emerald-100'" x-text="t.msg"></div>
+  </template>
+</div>
+</body>
+</html>

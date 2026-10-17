@@ -1,0 +1,63 @@
+windows: 8063 (6047 x 5m, 2016 x 15m), quotes: 56762
+period: 2026-09-26T09:30:00+00:00 .. 2026-10-17T09:40:00+00:00; in-sample < 2026-10-11T02:21:30+00:00 (5645 IS / 2418 OOS windows)
+assumptions: half-spread 0.005, taker fee 0.07*p*(1-p), maker fills need the ask to reach our bid
+
+CALIBRATION (lower Brier = better):
+   5m   0-60 s left  n=  6056  Brier market=0.0432  model=0.0921  coinflip=0.2500
+   5m  60-120s left  n=  6059  Brier market=0.1076  model=0.1364  coinflip=0.2500
+   5m 120-300s left  n= 15252  Brier market=0.1863  model=0.2072  coinflip=0.2500
+  15m   0-60 s left  n=  2026  Brier market=0.0274  model=0.0579  coinflip=0.2500
+  15m  60-120s left  n=  2013  Brier market=0.0668  model=0.0886  coinflip=0.2500
+  15m 120-300s left  n=  6031  Brier market=0.1082  model=0.1259  coinflip=0.2500
+  15m 300-600s left  n= 10067  Brier market=0.1608  model=0.1724  coinflip=0.2500
+  15m 600-900s left  n=  9258  Brier market=0.2145  model=0.2218  coinflip=0.2500
+  calibration buckets (all quotes): predicted -> realized Up rate
+   0.0-0.1: market n=  8879 real=0.029 | model n=  5925 real=0.038
+   0.1-0.2: market n=  4092 real=0.140 | model n=  4499 real=0.136
+   0.2-0.3: market n=  4372 real=0.242 | model n=  4232 real=0.213
+   0.3-0.4: market n=  4951 real=0.360 | model n=  5243 real=0.347
+   0.4-0.5: market n=  5826 real=0.441 | model n=  8176 real=0.447
+   0.5-0.6: market n=  5955 real=0.549 | model n=  8437 real=0.555
+   0.6-0.7: market n=  4883 real=0.656 | model n=  5497 real=0.668
+   0.7-0.8: market n=  4417 real=0.751 | model n=  4406 real=0.779
+   0.8-0.9: market n=  4259 real=0.863 | model n=  4501 real=0.871
+   0.9-1.0: market n=  9139 real=0.974 | model n=  5846 real=0.973
+
+STRATEGIES, flat $5 stake:
+  always skip [IS]                               trades=    0 win=None pnl=$     0.0 per$=None ci95=None maxDD=$0.0
+  always skip [OOS]                              trades=    0 win=None pnl=$     0.0 per$=None ci95=None maxDD=$0.0
+  BEFORE: bot v1 (model, taker, v1 exits) [IS]   trades=  295 win=0.631 pnl=$   -76.8 per$=-0.0521 ci95=(-0.0937, -0.0036) maxDD=$98.31
+  BEFORE: bot v1 (model, taker, v1 exits) [OOS]  trades=  164 win=0.683 pnl=$  -36.54 per$=-0.0446 ci95=(-0.1103, 0.0211) maxDD=$39.08
+  AFTER:  bot v2 (early favorite, v2 exits) [IS] trades=  174 win=0.925 pnl=$    25.9 per$=0.0298 ci95=(-0.0114, 0.0616) maxDD=$8.74
+  AFTER:  bot v2 (early favorite, v2 exits) [OOS] trades=   97 win=0.918 pnl=$   12.28 per$=0.0253 ci95=(-0.0196, 0.0715) maxDD=$6.66
+  v2 entries, hold to resolution [IS]            trades=  174 win=0.931 pnl=$    38.1 per$=0.0438 ci95=(-0.0074, 0.0837) maxDD=$10.0
+  v2 entries, hold to resolution [OOS]           trades=   97 win=0.918 pnl=$   13.96 per$=0.0288 ci95=(-0.0275, 0.0879) maxDD=$14.02
+  baseline: follow favorite, any time, hold [IS] trades= 5645 win=0.648 pnl=$ -423.36 per$=-0.015 ci95=(-0.0332, 0.0044) maxDD=$634.19
+  baseline: follow favorite, any time, hold [OOS] trades= 2418 win=0.616 pnl=$ -383.82 per$=-0.0317 ci95=(-0.0658, -0.0002) maxDD=$558.29
+  baseline: favorite 60-180s left 0.6-0.95 [IS]  trades= 4427 win=0.794 pnl=$ -495.68 per$=-0.0224 ci95=(-0.0361, -0.0068) maxDD=$572.55
+  baseline: favorite 60-180s left 0.6-0.95 [OOS] trades= 1868 win=0.783 pnl=$ -268.37 per$=-0.0287 ci95=(-0.0529, -0.0027) maxDD=$329.28
+  baseline: late momentum <=120s, >=3bp [IS]     trades= 1454 win=0.801 pnl=$ -250.93 per$=-0.0345 ci95=(-0.0634, -0.0072) maxDD=$289.41
+  baseline: late momentum <=120s, >=3bp [OOS]    trades=  668 win=0.795 pnl=$  -80.78 per$=-0.0242 ci95=(-0.071, 0.0187) maxDD=$105.8
+  maker: favorite 600-900s 0.85-0.95 (bid) [IS]  trades=   71 win=0.887 pnl=$    4.07 per$=0.0115 ci95=(-0.0904, 0.0889) maxDD=$13.68
+  maker: favorite 600-900s 0.85-0.95 (bid) [OOS] trades=   45 win=0.889 pnl=$    2.21 per$=0.0098 ci95=(-0.0933, 0.1106) maxDD=$10.54
+
+PORTFOLIO SIM ($500 start, bot.size_usd sizing, daily-loss / streak / drawdown halts):
+  BEFORE v1 [ IS] trades=  29 win=0.517 pnl=$ -32.26 final=$467.74 maxDD=10.1% dd_halt=True
+  BEFORE v1 [OOS] trades=  20 win=0.5 pnl=$ -46.06 final=$453.94 maxDD=9.6% dd_halt=True
+  BEFORE v1 [ALL] trades=  29 win=0.517 pnl=$ -32.26 final=$467.74 maxDD=10.1% dd_halt=True
+  AFTER  v2 [ IS] trades= 174 win=0.925 pnl=$   51.7 final=$551.7 maxDD=3.3% dd_halt=False
+  AFTER  v2 [OOS] trades=  97 win=0.918 pnl=$  24.42 final=$524.42 maxDD=2.3% dd_halt=False
+  AFTER  v2 [ALL] trades= 271 win=0.923 pnl=$  76.25 final=$576.25 maxDD=3.3% dd_halt=False
+
+NEWS (GDELT 'bitcoin' tone, 141 points, 2026-10-15..2026-10-17): corr(tone change, outcome surprise vs market) = -0.029 over 733 windows (|corr| < 0.074 is indistinguishable from zero)
+
+TUNING (selected on IS only; OOS shown for honesty; ~100 configs tested -> expect lucky IS winners):
+  favorite grid: taker avg per$ -0.0124 (9/33 positive); maker avg per$ -0.2610 (1/22 positive)
+  favorite[600-900s,0.85-0.95,taker]       IS per$=+0.0438 n= 174 | OOS per$=0.0288 n=97 ci=(-0.0275, 0.0879)
+  favorite[600-900s,0.8-0.9,taker]         IS per$=+0.0245 n= 332 | OOS per$=0.0328 n=161 ci=(-0.0261, 0.0857)
+  favorite[600-900s,0.8-0.9,maker]         IS per$=+0.0216 n= 131 | OOS per$=-0.0439 n=66 ci=(-0.1659, 0.0554)
+  favorite[20-60s,0.7-0.8,taker]           IS per$=+0.0215 n= 221 | OOS per$=-0.0469 n=92 ci=(-0.1709, 0.0649)
+  favorite[600-900s,0.7-0.8,taker]         IS per$=+0.0205 n= 724 | OOS per$=-0.0249 n=302 ci=(-0.0887, 0.0429)
+  model p>=0.8 edge>=0.07 elapsed>=0.5: IS per$=+0.0195 n=144 | OOS per$=0.0438 n=94 ci=(-0.0508, 0.1319)
+  model p>=0.9 edge>=0.0 elapsed>=0.5: IS per$=-0.0028 n=51 | OOS per$=0.0742 n=31 ci=(-0.0413, 0.183)
+  model p>=0.9 edge>=0.03 elapsed>=0.5: IS per$=-0.0028 n=51 | OOS per$=0.0742 n=31 ci=(-0.0413, 0.183)

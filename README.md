@@ -1,0 +1,291 @@
+# Polymarket BTC Up/Down bot (5m + 15m) + local dashboard
+
+A continuously running Python bot for Polymarket's **Bitcoin Up or Down** 5-minute and 15-minute
+markets, plus a local web dashboard to watch and control it. It runs in **paper mode by default**.
+
+- `bot.py`: the trading engine (market scanner, news check, entry rule, order execution,
+  position management, risk controls, main loop).
+- `dashboard/`: a local web UI (FastAPI + a no-build single page) showing live status, P&L,
+  positions, trades, the decision feed and the log, with start/stop/restart and a settings editor.
+- `backtest.py` / `collect_data.py`: download history and replay the bot's own rules against it.
+
+> ## ⚠️ Risk disclaimer
+> This is experimental software, not financial advice. **You can lose all the money you put in.**
+> Over 5 to 15 minutes, BTC moves are close to random, and news rarely
+> moves price predictably on that horizon. These markets are priced by fast, well-informed
+> traders. Crypto markets also charge a taker fee (`0.07 × p × (1−p)` per share, up to 1.75¢ at 50¢),
+> and you pay the bid/ask spread twice per round trip. A paper test on the live book cost about
+> 13% on a 28¢ contract just to get in and out. A 21-day backtest (below) found the original
+> model lost about 5% per $ traded. **No script guarantees profit.** Expect this bot
+> to skip almost every window, and expect to lose money if you loosen its thresholds.
+> Paper-trade for days first. If you then go live, use a small amount you can afford to lose.
+> Check that Polymarket is permitted where you live (see [Restrictions](#restrictions)).
+
+## Setup
+
+Python 3.11+ is required for live mode (the official `polymarket-client` SDK). 3.12 is recommended.
+
+**Windows (PowerShell or cmd)**
+```bat
+cd polymarket-btc-bot
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy .env.example .env
+```
+
+**macOS / Linux**
+```bash
+cd polymarket-btc-bot
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env` to taste. The defaults are paper mode with no keys needed. **Never commit `.env`**
+(it's in `.gitignore`).
+
+## Running the bot
+
+```bash
+python bot.py                        # runs forever; Ctrl+C to stop (Windows: .venv\Scripts\python.exe bot.py)
+python bot.py --max-loops 20         # short test run
+python bot.py --stop-after-trades 1  # exit after N entries once all positions are closed
+python bot.py --flatten              # close all open positions and exit
+python collect_data.py --days 21 && python backtest.py --tune   # validate on history
+```
+
+Ways to stop it:
+- **Ctrl+C** (or SIGTERM): finishes the current loop, saves state, exits. Positions stay open.
+- **`data/STOP` file**: same graceful stop; the dashboard's Stop button uses this. The bot deletes it.
+- **`KILL` file** (in the bot folder or `data/`): emergency halt. The bot **sells all open positions**
+  and stops entering. The halt is saved in `state.json` until cleared (dashboard → ⋯ → Clear halt).
+
+Outputs go to `data/`:
+- `decisions.csv`: every window evaluated, with the verdict (`ENTER`, `skip:fav_price`, ...), probability, bid/ask, edge
+- `trades.csv`: every paper or live fill, exit reason, and P&L
+- `state.json`: bankroll, open positions, and daily counters (persists across restarts)
+- `bot.log`: the full log
+
+## Dashboard
+
+![Dashboard overview](dashboard/screenshots/overview.png)
+
+**Windows:** double-click **`start_dashboard.bat`** (or run it from a terminal in the bot folder).
+It activates `.venv`, installs the dashboard packages if they're missing, starts the server and
+opens <http://127.0.0.1:8787/>. Close the window to stop the dashboard; the bot keeps running.
+
+**Any OS:**
+```bash
+python dashboard/server.py           # http://127.0.0.1:8787/
+python dashboard/server.py --open    # and open the browser
+python dashboard/server.py --port 9000
+```
+
+What you get (refreshes every 4 s):
+- Header: LIVE / PAPER mode, running or stopped (pid, uptime, last log heartbeat), Start / Stop / Restart,
+  and a ⋯ menu with Force kill, Emergency halt & flatten, and Clear halt.
+- KPI cards: bankroll, today's P&L, total P&L, win rate, trades today vs the daily cap, risk/halt status.
+- Open positions marked at the live CLOB best bid (`clob.polymarket.com/book`), with unrealized P&L and a
+  countdown. Resolved-but-unsettled positions are marked from Gamma's outcome price.
+- Cumulative realized P&L chart and trade history from `trades.csv` (filter Current / Live / Paper / All).
+- Decision feed of recent entries and skips with reasons (repeats collapsed; timing skips hidden by default).
+- `bot.log` tail with level filters; anything that looks like a key is redacted.
+- Settings tab to edit a whitelist of strategy and risk keys in `.env`, then **Save & restart**.
+
+Controls:
+
+| Button | What it does |
+|---|---|
+| Start | Launches `.venv` Python `bot.py` in the background (detached, so closing the dashboard doesn't stop it). PID in `data/bot.pid`. Refuses if the bot is already running or a `KILL` file exists. Asks for confirmation in LIVE mode. |
+| Stop | Graceful: writes `data/STOP` (plus SIGTERM on Linux/macOS). The bot exits after its current loop; **positions stay open**. Force-killed after 45 s if it hasn't exited. |
+| Restart | Stop (as above), then Start. |
+| Force kill | Kills the process tree immediately. Positions stay open. |
+| Emergency halt & flatten | Type `HALT`. Creates the `KILL` file: the running bot sells everything and stops entering. |
+| Clear halt | Type `RESUME`. Bot must be stopped. Removes `KILL` and resets the halt flag in `state.json` (a drawdown halt also resets the peak to the current bankroll). |
+
+Safety:
+- Binds to **127.0.0.1** only. Binding elsewhere (`--host`) is refused unless `DASHBOARD_TOKEN` is set.
+- Set `DASHBOARD_TOKEN` (env or `.env`) to require a token for every control/settings call.
+- The private key, wallet address, API keys and `LIVE_TRADING_CONFIRM` are **never** returned or editable.
+- Switching to live needs you to type `GO LIVE`, and `.env` must already contain
+  `LIVE_TRADING_CONFIRM=I_UNDERSTAND_THIS_USES_REAL_MONEY`, which you add by hand. The dashboard never writes it.
+- Control calls must be same-origin JSON requests, so other websites can't trigger them.
+- The previous `.env` is kept as `.env.bak` (git-ignored) on every save.
+
+The dashboard detects a bot that was started outside it (e.g. from a terminal) and can stop it too.
+
+## Configuration
+
+All settings are environment variables in `.env` (see `.env.example` for every key). The main ones:
+
+| Key | Default | Dashboard | Meaning |
+|---|---|---|---|
+| `DRY_RUN` | `true` | ✏️ (typed confirm) | Paper mode. Live needs `DRY_RUN=false` **and** `LIVE_TRADING_CONFIRM`. |
+| `LIVE_TRADING_CONFIRM` | — | never shown | Must be `I_UNDERSTAND_THIS_USES_REAL_MONEY` to trade live. |
+| `POLYMARKET_PRIVATE_KEY` / `POLYMARKET_WALLET_ADDRESS` | — | never shown | Signer key and account wallet (live only). |
+| `STRATEGY` | `favorite` | read-only | `favorite` (v2 rule) or `model` (v1, research only). |
+| `FAV_DURATIONS` | `15m` | read-only | Window lengths the favorite rule trades. |
+| `FAV_MIN_PRICE` / `FAV_MAX_PRICE` | `0.85` / `0.95` | ✏️ | Favorite's mid must be in this band (ask ≤ max). |
+| `FAV_MIN_SECS_LEFT` / `FAV_MAX_SECS_LEFT` | `600` / `900` | ✏️ | Seconds left in the window to allow entry. |
+| `FAV_EDGE_EST` | `0.015` | ✏️ | Edge assumed over the mid. Entry needs `mid + edge − ask − fee > 0`. Higher = looser. |
+| `MAX_POSITION_USD` | `10` | ✏️ | Hard cap per trade. |
+| `MAX_POSITION_PCT` / `KELLY_FRACTION` | `0.02` / `0.25` | read-only | Per-trade % of bankroll and Kelly fraction caps. |
+| `MAX_OPEN_POSITIONS` | `2` | ✏️ | Concurrent positions. |
+| `MAX_TRADES_PER_DAY` | `20` | ✏️ | Entries per UTC day. |
+| `TAKE_PROFIT_MIN_BID` | `0.97` | ✏️ | Take profit once the bid reaches this. |
+| `STOP_LOSS_PCT` | `0.60` | ✏️ | Sell after losing this fraction of cost. |
+| `DAILY_LOSS_LIMIT_PCT` | `0.05` | ✏️ | Halt for the UTC day after this loss. |
+| `MAX_DRAWDOWN_PCT` | `0.10` | ✏️ | Halt when bankroll falls this far below its peak (not auto-reset). |
+| `MAX_CONSECUTIVE_LOSSES` / `COOLDOWN_AFTER_LOSS_SECONDS` | `4` / `600` | read-only | Loss-streak halt and pause after a loss. |
+| `ARB_ENABLED` | `true` | read-only | Complete-set arbitrage when Up+Down asks + fees < $1. |
+| `KILL_SWITCH_FILE` | `KILL` | read-only | File name that triggers halt & flatten. |
+| `LOOP_SECONDS` / `SCAN_SECONDS` | `5` / `20` | read-only | Main loop and market rescan intervals. |
+| `DATA_DIR` | `./data` | — | Where the bot (and dashboard) read/write files. |
+| `DASHBOARD_TOKEN` / `DASHBOARD_PORT` | — / `8787` | — | Dashboard access token and port. |
+
+## Backtest findings (21 days, 8,063 resolved windows) — read before trading
+
+`python collect_data.py --days 21` downloads history and `python backtest.py --tune` replays the bot's
+own functions against it (`model_p_up`, `entry_gates`, `favorite_signal`, `size_usd`, `exit_reason`).
+Full output: `data/backtest/report.txt`. In-sample is the first 70% of the period and out-of-sample is the last 30%.
+
+| Result (flat $5 stakes, after fee + 0.5c half-spread) | In-sample | Out-of-sample |
+|---|---|---|
+| **v1 bot** (BTC momentum model, quick TP, 30% stop) | 295 trades, 63% win, **−5.2% per $** | 164 trades, 68% win, **−4.5% per $** |
+| **v2 bot** (early favorite, TP at 97c, 60% stop) | 174 trades, 92.5% win, **+3.0% per $** | 97 trades, 92% win, **+2.5% per $** |
+| Follow the favorite at any time | −1.5% | −3.2% |
+| Late momentum (≤2 min left, ≥3 bp move) | −3.5% | −2.4% |
+| Maker (resting bid) entries, average over the grid | −26% (adverse selection) | — |
+
+What the data says:
+- **The market is well calibrated, and the v1 model adds nothing to it.** The market's price has a
+  lower Brier score than the model in every time bucket. In a logistic regression, the model's
+  coefficient is about 0 once the market price is included. The v1 "edge" was mostly fees and bad data.
+- **Quick profit-taking and tight stops cost money.** Every early exit pays the spread and the fee
+  again. The v1 exits cut results by about 3–5% per $. v2 still takes profit, but only near certainty
+  (bid ≥ 97c), and it stops out at −60% instead of −30%.
+- **The one rule that was positive both in-sample and out-of-sample:** in **15-minute** windows with
+  **10–15 minutes left**, the favorite priced **85–95c** won about 92–93% of the time, slightly more
+  than its price implied. The 95% confidence intervals still include zero (OOS −2.0% to +7.2% per $),
+  and the rule was picked from a grid of roughly 100 configs. **Treat it as unproven.** Paper-trade it
+  before risking money.
+- **The edge is tiny and depends on a 1-cent spread.** Rerunning the backtest with a 2-cent spread
+  (`--half-spread 0.01`) leaves v2 at about break-even: 62 trades, −$2.16. If the live book is wider
+  than 1 cent when the bot fires, assume there is no edge.
+- **Maker entries lose.** Resting bids get filled mostly when the price is moving against them.
+- **News added nothing measurable.** Over the roughly 2 days of GDELT "bitcoin" news-tone history we
+  could download (GDELT rate-limited this box), the correlation between news-tone changes and the
+  outcome surprise versus the market was −0.03 across 733 windows. That is indistinguishable from
+  zero. The news module still runs (rule 2: fresh research is required before any entry) but does
+  not change the probability (`USE_NEWS_IN_MODEL=false`).
+- Coinbase price direction matched the Chainlink-settled outcome only **87%** of the time (TWAP
+  settlement plus the price gap between feeds). This is why exchange-price models struggle here.
+
+## Strategy modules (STRATEGY env)
+- `favorite` (default, v2): the early-favorite rule above, using the 15m windows only.
+- `model`: the v1 model with its gates. Kept for research. It lost money in the backtest.
+- Complete-set arbitrage (`ARB_ENABLED=true`): buys Up and Down whenever both asks plus fees total
+  less than $1 − 1c, then holds both legs to resolution. If one leg fails, the other is sold. This is
+  rarely available, so the bot logs every hit as `ARB` in `decisions.csv`.
+
+## How it maps to the rules
+
+| Section in `bot.py` | Rule |
+|---|---|
+| **1. Config** | Every threshold is an env var. Paper mode is on by default, and live mode needs `DRY_RUN=false` plus the confirmation phrase. |
+| **2. Market scanner** | Rules 1 and 5. It finds every live `btc-updown-5m/15m` market (series, bitcoin-tag sweep, and computed slugs), then reads books, Coinbase BTC prices, and the Chainlink price to beat. |
+| **3. News / research** | Rule 2. RSS feeds plus optional API keys and an optional LLM scorer. No fresh research means no trade. Sentiment only affects the probability if `USE_NEWS_IN_MODEL=true`. |
+| **4. Decision logic** | Rule 3. `favorite_signal`: a 15m window with 600–900 s left, favorite mid between 85c and 95c, ask ≤ 95c, spread ≤ 3c, and positive edge after fees. `model` mode keeps the v1 gates. |
+| **5. Order execution** | Rule 7. Paper fills step through the real book. Live orders are SDK FOK buys and FAK sells, with auto-redeem of winnings after resolution. |
+| **6. Position management** | Rules 3 and 4. Take profit when bid ≥ 97c (most of the remaining upside), stop at −60%, otherwise hold to resolution. The thesis exit and pre-expiry exit are optional (both off by default, because the backtest says they cost money). |
+| **7. Risk controls** | Rule 6. Each trade is capped at the smallest of 2% of bankroll, $10, and ¼-Kelly. BTC exposure is capped at 5% and same-direction exposure at 4%. Other limits: at most 2 positions, 20 trades a day, and a cooldown after a loss. Halts: 5% daily loss, 4 losses in a row (resets daily), 10% drawdown, or a KILL file. The minimum order is 5 shares, so at 2% sizing you need about **$250+ bankroll** to trade 90c favorites. |
+| **8. Main loop** | Rule 5. Every 5 s: manage positions, check arbitrage, evaluate live windows. Markets are rescanned every 20 s and news every 2 min. |
+
+Portfolio simulation with these risk rules ($500 start): v1 hit the 10% drawdown halt in both
+halves. v2 ended at +$51.70 in-sample and +$24.40 out-of-sample, with max drawdown ≤ 3.3%.
+
+## Research: what others found (checked October 2026)
+- Binance order flow does not beat Polymarket's own book on BTC 15m. It is a null result on
+  millisecond data, and quotes react to large Binance moves in about 347 ms:
+  https://tigerpolymarketprediction.substack.com/p/the-null-edge-why-binance-order-flow
+- A spot lead/lag rule after fees: 98 trades, profit factor 0.97, rejected:
+  https://validatedstrategies.com/strategy/PSL
+- A walk-forward backtest and live bot found 15m prices "well calibrated" and expected value near
+  zero after costs: https://ramonfontelles.com/articles/trading-15m
+- A repo whose 92%-win "minute-13 trend" strategy loses money after fees, and where the book beats
+  raw spot: https://github.com/Jimmy6929/Polymarket-BTC-15-Minute-Trading-Bot
+- Latency arbitrage against a stale Polymarket price feed did work before fees. Polymarket added
+  dynamic taker fees in January 2026 specifically to kill it:
+  https://vantage.fyi/writing/polymarket-arb ,
+  https://www.financemagnates.com/cryptocurrency/polymarket-introduces-dynamic-fees-to-curb-latency-arbitrage-in-short-term-crypto-markets/
+- Maker rebate and complete-set bots (post both sides below $1, then merge). These are plausible but
+  need WebSocket speed and inventory control, and there are no audited results:
+  https://github.com/direkturcrypto/polymarket-terminal , https://github.com/CZA1006/Poly-Maker-RS
+- Fee formula used here: https://docs.polymarket.com/trading/fees (crypto taker fee
+  `0.07·p·(1−p)` per share, makers pay nothing).
+
+## Plugging in a wallet (live mode)
+
+**About WalletConnect:** a bot running unattended can't sign through WalletConnect, because
+WalletConnect needs you to approve each signature in your wallet app. So the bot signs with a
+private key from `.env`, using Polymarket's official SDK. The wallet type (EOA, Proxy, Safe, or
+Deposit Wallet) is detected automatically from the key and address.
+
+Options, safest first:
+1. **Dedicated hot wallet (recommended).** Create a fresh wallet just for the bot (for example a
+   new MetaMask/Rabby account). Sign in to polymarket.com with it, deposit a small amount, and
+   copy the account wallet address from the profile menu. Export that account's private key from
+   the wallet app (MetaMask: Account details → Show private key).
+2. **Your existing account.** If you log in with MetaMask/Rabby or another wallet through
+   WalletConnect, the signer is that wallet's key. Export it from the wallet app. If you log in
+   with email/Google, polymarket.com lets you export the key. Either way, that key controls
+   **everything** in the account, so option 1 is better.
+3. Polymarket also supports **session keys** (a scoped, time-limited signer for a Deposit Wallet).
+   See docs.polymarket.com/trading/session-keys if you'd rather not put an owner key on a server.
+
+Then, in `.env`:
+```
+DRY_RUN=false
+LIVE_TRADING_CONFIRM=I_UNDERSTAND_THIS_USES_REAL_MONEY
+POLYMARKET_PRIVATE_KEY=0x...
+POLYMARKET_WALLET_ADDRESS=0x...            # your Polymarket account wallet
+POLYMARKET_RELAYER_API_KEY=...             # optional: Settings → API Keys → Relayer API Keys
+POLYMARKET_RELAYER_API_KEY_ADDRESS=0x...
+MAX_POSITION_USD=2                         # start tiny
+```
+
+Notes:
+- **Collateral:** since the April 2026 CLOB V2 upgrade, Polymarket trades in **pUSD**, a token
+  backed by USDC. Depositing USDC (on Polygon) through polymarket.com converts it for you.
+- **Approvals:** if you set a Relayer API key, the bot calls `setup_trading_approvals()` at
+  startup. This is idempotent and gasless. Without one, the SDK retries approvals when an order
+  needs them.
+- **Old SDKs:** the legacy `py-clob-client` no longer works against production, and
+  `py-clob-client-v2` is deprecated. This bot uses `polymarket-client`.
+- **Positions held to resolution** (when there are no bids to sell into) must be redeemed in the
+  UI, or with `client.redeem_positions(condition_id=...)`.
+- **Keep the key safe:** never commit `.env`, and keep only test funds in the bot wallet.
+
+## Restrictions
+
+Polymarket blocks trading from a number of countries (for example, US IPs report `blocked: true`), and
+these markets are flagged `restricted`. The bot checks `https://polymarket.com/api/geoblock` and
+refuses to trade live if your IP is blocked. Check Polymarket's Terms of Use for where you are,
+and don't use a VPN to get around the block.
+
+## Known limitations
+- The "price to beat" comes from an undocumented polymarket.com endpoint. The bot cross-checks
+  it against Coinbase and falls back to the Coinbase 1-minute open. Polymarket's real-time
+  Chainlink feed (PolyBolt `price.crypto`) needs CLOB API credentials and is not wired in. It
+  would be the best upgrade for live mode.
+- Exchange spot (Coinbase) is scaled onto the Chainlink basis measured at the window open, but a
+  few basis points of mismatch can remain.
+- Keyword sentiment is crude. The optional LLM scorer is better but still slow relative to a
+  5-minute window.
+- The live order path matches the SDK's documented API, but it has not been tested with a funded
+  wallet. Test with $1–2 orders first.
+- Dashboard: the P&L chart shows **realized** P&L from `trades.csv`, not wallet equity. In live mode the
+  bot's bankroll comes from the pUSD balance plus open-position cost, so it can briefly double-count a
+  winning position between Polymarket paying out and the bot settling it.
+- Dashboard: stopping a bot that is mid-network-call can take up to one loop (usually < 15 s); it is
+  force-killed after 45 s. On Windows the graceful path relies on the `data/STOP` file.

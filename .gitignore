@@ -1,0 +1,32 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Bot runtime data (keep folder only)
+data/*
+!data/.gitkeep
+data/pc_sample/
+*.log
+*.pid
+
+# Kill switch / stop request files
+KILL
+STOP
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ...but keep the backtest summary that README refers to
+!data/backtest/
+data/backtest/*
+!data/backtest/report.txt
