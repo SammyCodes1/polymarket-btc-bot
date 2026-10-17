@@ -394,6 +394,10 @@ def find_bot_processes() -> list[psutil.Process]:
 def process_status() -> dict:
     procs = find_bot_processes()
     info = read_json(pid_file()) or {}
+    if isinstance(info, int):  # plain-number pid file (bot started outside the dashboard)
+        info = {"pid": info}
+    elif not isinstance(info, dict):
+        info = {}
     out: dict[str, Any] = {"running": bool(procs), "pids": [p.pid for p in procs], "pid": None,
                            "started_at": None, "uptime_s": None, "args": [], "started_by": None,
                            "op": _op_state["op"], "op_message": _op_state["message"]}
