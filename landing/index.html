@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC Up/Down Bot · Open-source Polymarket trading bot</title>
+<meta name="description" content="Open-source Python bot and local dashboard for Polymarket's Bitcoin 15-minute Up/Down markets. Paper mode by default, hard risk limits, keys stay on your machine.">
+<meta property="og:title" content="BTC Up/Down Bot for Polymarket">
+<meta property="og:description" content="Open-source bot + local dashboard for Polymarket BTC 15-minute markets. Paper mode by default. Your keys never leave your machine.">
+<meta property="og:image" content="img/overview.png">
+<meta name="theme-color" content="#0a0c10">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%23f7931a'/><text x='32' y='45' font-size='36' text-anchor='middle' fill='white' font-family='Arial' font-weight='700'>B</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="glow g1"></div><div class="glow g2"></div>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><span class="logo">B</span><span>BTC Up/Down Bot</span></a>
+    <nav class="links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#screens">Screenshots</a>
+      <a href="#start">Quick start</a>
+      <a href="#risk" class="warn-link">Risks</a>
+    </nav>
+    <a class="btn btn-ghost sm" href="https://github.com/SammyCodes1/polymarket-btc-bot" target="_blank" rel="noopener"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
+  </div>
+</header>
+
+<main id="top">
+  <!-- HERO -->
+  <section class="hero wrap">
+    <div class="pill"><span class="dot"></span>Open source · MIT · Paper mode by default</div>
+    <h1>An open-source trading bot for <span class="grad">Polymarket's Bitcoin 15-minute</span> markets</h1>
+    <p class="lead">A Python bot that watches every BTC Up/Down window and buys the favorite side, UP or DOWN, only inside a tight price band. Every trade has a take-profit and a stop-loss, and the bot halts itself on daily-loss and drawdown limits. It comes with a local dashboard to watch and control it.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/SammyCodes1/polymarket-btc-bot" target="_blank" rel="noopener"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>View on GitHub</a>
+      <a class="btn btn-ghost" href="#start">Run it yourself →</a>
+    </div>
+    <div class="notice"><strong>🔐 There's no sign-up and nothing to paste here.</strong> The bot runs on <em>your</em> computer or server, and your keys stay in a local <code>.env</code> file. Never paste a private key into any website, including this one.</div>
+    <figure class="hero-shot">
+      <img src="img/overview.png" alt="Dashboard overview: bankroll, P&amp;L chart, open positions, trade history and decision feed (demo, figures blurred)" width="1440" height="900">
+      <figcaption>The local dashboard, shown in paper mode. Figures are blurred.</figcaption>
+    </figure>
+  </section>
+
+  <!-- HOW -->
+  <section id="how" class="wrap section">
+    <h2>How it works</h2>
+    <p class="sub">A favorite strategy on Polymarket's “Bitcoin Up or Down – 15 minutes” markets.</p>
+    <ol class="steps">
+      <li><span class="n">1</span><h3>Scan</h3><p>Every few seconds the bot finds the live 15-minute BTC window and reads the CLOB order book and a BTC spot feed.</p></li>
+      <li><span class="n">2</span><h3>Filter</h3><p>It enters only if one side, UP <em>or</em> DOWN, is the favorite inside a set price band (for example 70–75¢), enough time is left, the spread is tight, and the expected edge still beats the taker fee.</p></li>
+      <li><span class="n">3</span><h3>Size</h3><p>Each position is capped by a $ per-trade limit, a % of bankroll, and total exposure limits. If there isn't enough room, it skips.</p></li>
+      <li><span class="n">4</span><h3>Exit</h3><p>It takes profit when the bid reaches the target (for example 97¢), stops out when the loss reaches the stop (for example −60%), or holds to resolution.</p></li>
+      <li><span class="n">5</span><h3>Halt</h3><p>It stops for the day after a daily-loss limit, stops after a max drawdown from peak, and cools down after losses. A kill switch flattens everything.</p></li>
+    </ol>
+  </section>
+
+  <!-- FEATURES -->
+  <section id="features" class="wrap section">
+    <h2>Features</h2>
+    <div class="grid3">
+      <article class="card"><div class="ic">📊</div><h3>Local dashboard</h3><p>Live mode and status, bankroll, today's and total P&amp;L, win rate, open positions marked at the live best bid, a cumulative P&amp;L chart, trade history, a decision feed for every window, and the log. Start, stop and restart it in one click.</p></article>
+      <article class="card"><div class="ic">🧭</div><h3>One-minute onboarding</h3><p>On first run, a setup screen asks for your wallet, mode and starter limits. The key is written only to the local <code>.env</code> file, never shown again, never logged, and wallet changes are accepted only from <code>127.0.0.1</code>.</p></article>
+      <article class="card"><div class="ic">🛡️</div><h3>Hard risk limits</h3><p>Per-trade $ cap, max trades per day, max open positions, a daily-loss halt, a max-drawdown halt, a consecutive-loss limit with cooldown, and an exposure cap. Each one is editable in Settings.</p></article>
+      <article class="card"><div class="ic">🧪</div><h3>Paper mode first</h3><p>Paper is the default: it simulates fills against the real order book and places no orders. Going live means typing <code>GO LIVE</code> and ticking a real-money confirmation.</p></article>
+      <article class="card"><div class="ic">🧾</div><h3>Honest bookkeeping</h3><p>Fees are included in the cost basis. The bankroll is cash + open positions + unredeemed winners. Each decision and fill is written to CSV, and state persists across restarts.</p></article>
+      <article class="card"><div class="ic">🔁</div><h3>Backtest tools</h3><p><code>collect_data.py</code> and <code>backtest.py</code> replay the bot's own rules on market history, so you can test settings before risking anything.</p></article>
+    </div>
+  </section>
+
+  <!-- SCREENS -->
+  <section id="screens" class="wrap section">
+    <h2>Screenshots</h2>
+    <p class="sub">Click any image to open it full size. Demo data only.</p>
+    <div class="gallery">
+      <a href="img/onboarding.png" target="_blank"><figure><img loading="lazy" src="img/onboarding.png" alt="First-run setup screen"><figcaption>First-run setup: wallet, mode and starter limits</figcaption></figure></a>
+      <a href="img/settings.png" target="_blank"><figure><img loading="lazy" src="img/settings.png" alt="Strategy and risk settings"><figcaption>Strategy, risk and exit settings</figcaption></figure></a>
+      <a href="img/settings_wallet.png" target="_blank"><figure><img loading="lazy" src="img/settings_wallet.png" alt="Wallet and trading mode cards"><figcaption>Wallet card: the key is never displayed</figcaption></figure></a>
+      <a href="img/go_live_confirm.png" target="_blank"><figure><img loading="lazy" src="img/go_live_confirm.png" alt="Go-live confirmation dialog"><figcaption>A typed confirmation is required for real money</figcaption></figure></a>
+    </div>
+  </section>
+
+  <!-- QUICK START -->
+  <section id="start" class="wrap section">
+    <h2>Quick start <span class="muted">(~2 minutes)</span></h2>
+    <p class="sub">You need <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">Python 3.11+</a> (on Windows, tick “Add python.exe to PATH”) and git.</p>
+    <div class="qs">
+      <div class="qs-step"><span class="n">1</span><div><h3>Clone</h3>
+<pre><code>git clone https://github.com/SammyCodes1/polymarket-btc-bot.git
+cd polymarket-btc-bot</code></pre></div></div>
+      <div class="qs-step"><span class="n">2</span><div><h3>Launch the dashboard</h3>
+<p>On Windows, double-click <code>start_dashboard.bat</code>. On macOS/Linux, run:</p>
+<pre><code>./start_dashboard.sh</code></pre>
+<p>The first run creates <code>.venv</code>, installs the requirements and opens <code>http://127.0.0.1:8787/</code>.</p></div></div>
+      <div class="qs-step"><span class="n">3</span><div><h3>Add your wallet locally</h3><p>On the setup screen at <code>127.0.0.1</code>, which runs on your own machine, enter your private key and Polymarket wallet address. Use a dedicated wallet that holds only money you can afford to lose. You can also skip this and explore in paper mode.</p></div></div>
+      <div class="qs-step"><span class="n">4</span><div><h3>Choose Paper or Live</h3><p>Paper is the default. Live requires typing <code>GO LIVE</code> and ticking “I understand this uses real money”.</p></div></div>
+      <div class="qs-step"><span class="n">5</span><div><h3>Set limits and start</h3><p>Set the starter limits, then click <strong>Save &amp; Start</strong>. You land on the live overview.</p></div></div>
+    </div>
+    <details class="manual"><summary>Manual setup without the launcher</summary>
+<pre><code># macOS / Linux
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # edit by hand, or use the dashboard setup screen
+python bot.py               # runs forever; Ctrl+C to stop
+python dashboard/server.py  # http://127.0.0.1:8787/
+
+# Windows
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy .env.example .env</code></pre>
+    <p class="muted">Never commit <code>.env</code>. It's already in <code>.gitignore</code>. The full docs are in the <a href="https://github.com/SammyCodes1/polymarket-btc-bot#readme" target="_blank" rel="noopener">README</a>.</p>
+    </details>
+  </section>
+
+  <!-- RISK -->
+  <section id="risk" class="wrap section">
+    <div class="risk">
+      <h2>⚠️ Read this before you use real money</h2>
+      <ul>
+        <li><strong>This is real money, and there's no guarantee.</strong> It's experimental software, not financial advice. You can lose everything you put in.</li>
+        <li><strong>Expected value can be negative.</strong> 15-minute BTC moves are close to random. These markets are priced by fast, well-informed traders. The taker fee (<code>0.07 × p × (1−p)</code> per share) and the bid/ask spread eat small edges. Loosening the thresholds generally makes results worse, not better.</li>
+        <li><strong>Past and backtest results don't predict future returns.</strong> Paper-trade for days first. If you go live, use a small amount you can afford to lose.</li>
+        <li><strong>Polymarket geoblocks some countries.</strong> Trading is blocked or close-only in places including the US, UK, France, Germany, Italy, Belgium, Poland, Australia, Brazil, Singapore, Taiwan, Thailand and others. Check Polymarket's <a href="https://docs.polymarket.com/developers/CLOB/geoblock" target="_blank" rel="noopener">current list</a> and follow the rules where you live. Don't use a VPN to get around restrictions.</li>
+        <li><strong>Your keys stay on your machine.</strong> Your private key belongs only in the local <code>.env</code> file on a computer or server you control. <strong>Never paste a private key into any website.</strong> That includes this page, chat apps, and anyone claiming to “help set up” the bot. Anyone with the key controls the wallet.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="wrap section final">
+    <h2>Read the code. Run it in paper mode. Decide for yourself.</h2>
+    <a class="btn btn-primary" href="https://github.com/SammyCodes1/polymarket-btc-bot" target="_blank" rel="noopener"><svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>SammyCodes1/polymarket-btc-bot</a>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <span>MIT licensed · Not affiliated with Polymarket · Not financial advice</span>
+  <a href="https://github.com/SammyCodes1/polymarket-btc-bot" target="_blank" rel="noopener">GitHub</a>
+</footer>
+</body>
+</html>
