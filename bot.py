@@ -174,6 +174,14 @@ class Config:
     # open a position with this little time left. 0 = off (hold to resolution). Backtest: 120/180/300s exits
     # cost 0.12-0.40 $/trade (selling into thin late books), so it is off. FORCE_EXIT_SECONDS still works too.
     fav_exit_seconds_left: int = _env("FAV_EXIT_SECONDS_LEFT", 0)
+    # Spot exit (favorite strategy): sell when the live BTC spot (bot's price feed, Bitstamp first) is at least
+    # SPOT_EXIT_CROSS_USD through the window's opening price (price to beat) AGAINST the position, with
+    # <= SPOT_EXIT_SECS_LEFT seconds left. Unlike the token-price stop this reacts to BTC itself. Off by default.
+    # 1-minute backtest (/workspace/bt_loss): X=$50,Y=600 ~= baseline (ties, not better); needs paper testing.
+    spot_exit_enabled: bool = _env("SPOT_EXIT_ENABLED", False)
+    spot_exit_cross_usd: float = _env("SPOT_EXIT_CROSS_USD", 50.0)
+    spot_exit_secs_left: int = _env("SPOT_EXIT_SECS_LEFT", 600)
+    spot_exit_max_age: float = _env("SPOT_EXIT_MAX_AGE", 20.0)     # ignore spot snapshots older than this (s)
     slippage: float = _env("SLIPPAGE", 0.02)
 
     # --- risk controls ---
@@ -1734,6 +1742,20 @@ def exit_reason(cfg: "Config", *, entry: float, bid: float, shares: float, cost_
     return None
 
 
+def spot_exit_reason(cfg: "Config", *, side: str, spot: Optional[float], ptb: Optional[float],
+                     secs_left: float, snap_age: float = 0.0) -> Optional[tuple[str, str]]:
+    """Pure spot-exit rule: BTC spot is >= SPOT_EXIT_CROSS_USD through the price to beat against `side`
+    with <= SPOT_EXIT_SECS_LEFT left. Returns ("spot_exit", detail) or None. Fails open (no exit) on missing data."""
+    if not getattr(cfg, "spot_exit_enabled", False) or not spot or not ptb or spot <= 0 or ptb <= 0:
+        return None
+    if snap_age > cfg.spot_exit_max_age or secs_left > cfg.spot_exit_secs_left or secs_left <= 0:
+        return None
+    against = (ptb - spot) if side == "UP" else (spot - ptb)
+    if against >= cfg.spot_exit_cross_usd:
+        return "spot_exit", f"{side} spot={spot:.0f} ptb={ptb:.0f} against=${against:.0f}>={cfg.spot_exit_cross_usd:g} left={secs_left:.0f}s"
+    return None
+
+
 def parse_close_requests(text: str) -> Optional[list[dict]]:
     """Parse close_requests.json. Accepts a list or {"requests": [...]}. Returns normalized requests
     ({id, slug, token_id, key, all, requested_at}); drops malformed entries; None if the file is garbage."""
@@ -2342,6 +2364,11 @@ class PositionManager:
                     p_side = p_up if pos.side == "UP" else 1 - p_up
             ex = exit_reason(CFG, entry=pos.entry_price, bid=bid, shares=pos.shares, cost_usd=pos.cost_usd,
                              fee_rate=pos.fee_rate, secs_left=left, p_side=p_side)
+            if not ex and CFG.strategy == "favorite" and CFG.spot_exit_enabled and mkt and snap and pos.kind == "dir":
+                ptb, _ = price_to_beat(mkt, snap)
+                spot = snap.spot * _BASIS.get(mkt.slug, 1.0)    # exchange spot on the Chainlink basis, if measured
+                ex = spot_exit_reason(CFG, side=pos.side, spot=spot, ptb=ptb, secs_left=left,
+                                      snap_age=now_ts() - snap.fetched_at)
             if ex:
                 kind, detail = ex
                 px = max(0.01, bid - 0.01) if kind == "take_profit" else min_px

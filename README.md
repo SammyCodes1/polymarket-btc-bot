@@ -176,6 +176,7 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `ENTRY_MODE` / `LIMIT_OFFSET` / `LIMIT_CANCEL_SECS_LEFT` | `market` / `0.01` / `600` | read-only | Taker FOK entry, or a resting post-only limit bid at mid − offset (see "Limit entries"). |
 | `FAV_STOP_DROP_CENTS` | `0` (off) | read-only | Hard stop: sell once the bid is this many cents below entry (e.g. `15`). Fires before `STOP_LOSS_PCT` when tighter. |
 | `FAV_EXIT_SECONDS_LEFT` | `0` (off) | read-only | Time exit: sell any position not at take-profit with this many seconds left, and never enter with less time left. |
+| `SPOT_EXIT_ENABLED` / `SPOT_EXIT_CROSS_USD` / `SPOT_EXIT_SECS_LEFT` | `false` / `50` / `600` | read-only | Spot exit: sell when live BTC spot (Bitstamp feed, on the Chainlink basis when known) is at least X USD through the window's price to beat against the position with ≤ Y seconds left. Ignores spot older than `SPOT_EXIT_MAX_AGE` (20s). 1-minute backtest: ties hold-to-settlement (+$75.1 vs +$76.4 over 22 days); paper test only. |
 | `DAILY_LOSS_LIMIT_PCT` | `0.05` | ✏️ | Halt for the UTC day after this loss. |
 | `MAX_DRAWDOWN_PCT` | `0.10` | ✏️ | Halt when bankroll falls this far below its peak (not auto-reset). |
 | `MAX_CONSECUTIVE_LOSSES` / `COOLDOWN_AFTER_LOSS_SECONDS` | `4` / `600` | read-only | Loss-streak halt and pause after a loss. |
@@ -412,3 +413,9 @@ and don't use a VPN to get around the block.
   winning position between Polymarket paying out and the bot settling it.
 - Dashboard: stopping a bot that is mid-network-call can take up to one loop (usually < 15 s); it is
   force-killed after 45 s. On Windows the graceful path relies on the `data/STOP` file.
+
+
+### Oct 2026 paper ideas (backtests in /workspace/bt_new)
+* **Late snipe** (95–99¢, 60–180s left, hold): no new code, use `FAV_MIN_PRICE=0.95 FAV_MAX_PRICE=0.99 FAV_MIN_SECS_LEFT=60 FAV_MAX_SECS_LEFT=180 TAKE_PROFIT_MIN_BID=1.01 FAV_MIN_SIZE_ONLY=true MAX_POSITION_USD=5.00`. Backtest: win rate ≈ break-even rate, P&L ≈ 0 to negative.
+* **5-minute favorite** (`FAV_DURATIONS=5m`, 82–92¢, 200–300s left): backtest negative in train and test.
+* **Spot exit** (`SPOT_EXIT_ENABLED=true`, $50, 600s): ties the baseline at 1-minute resolution; the paper bot tests the real-time version.
