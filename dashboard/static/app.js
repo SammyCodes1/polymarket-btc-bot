@@ -290,13 +290,16 @@ function dash() {
     },
     secsLeft(p) { return p.end_ts ? Math.round(Number(p.end_ts) - this.now) : p.secs_left; },
     posTrack(p) {
-      const cl = x => Math.max(0, Math.min(100, x * 100));
       const basis = (p.cost_usd && p.shares) ? Number(p.cost_usd) / Number(p.shares) : Number(p.entry_price);
       const slp = Number(this.cfgVal('STOP_LOSS_PCT') ?? 0.6), sl = basis * (1 - slp), tp = Number(this.cfgVal('TAKE_PROFIT_MIN_BID') ?? 0.97);
       const e = Number(p.entry_price), m = p.mark == null ? null : Number(p.mark), up = m != null && m >= e;
-      const hasSL = slp > 0, tpLX = Math.min(cl(tp), 94), near = (a, b) => Math.abs(a - b) < 16;
-      const eLow = near(cl(e), tpLX) || (hasSL && near(cl(e), cl(sl)));
-      return { sl, tp, e, m, up, hasSL, eLow, slX: cl(sl), tpX: cl(tp), eX: cl(e), mX: m == null ? null : cl(m),
+      const hasSL = slp > 0;
+      // zoom the bar to the range that matters (lowest of entry/now/SL minus a margin, up to $1)
+      const lows = [e, tp]; if (m != null) lows.push(m); if (hasSL) lows.push(sl);
+      const lo = Math.max(0, Math.min(...lows) - 0.08), hi = 1;
+      const cl = x => Math.max(0, Math.min(100, (x - lo) / (hi - lo) * 100));
+      const mX = m == null ? null : cl(m);
+      return { sl, tp, e, m, up, hasSL, slX: cl(sl), tpX: cl(tp), eX: cl(e), mX, bX: mX == null ? null : Math.max(12, Math.min(88, mX)),
         fillL: m == null ? cl(e) : Math.min(cl(e), cl(m)), fillW: m == null ? 0 : Math.abs(cl(m) - cl(e)) };
     },
     tradeRowClass(t) { if (this.isFalse(t.ok) || t.action === 'BUY') return ''; const p = Number(t.pnl); return t.pnl === '' || t.pnl == null ? '' : (p > 0 ? 'win' : 'loss'); },
