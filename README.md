@@ -165,6 +165,7 @@ All settings are environment variables in `.env` (see `.env.example` for every k
 | `FAV_MIN_SECS_LEFT` / `FAV_MAX_SECS_LEFT` | `600` / `900` | ✏️ | Seconds left in the window to allow entry. |
 | `FAV_EDGE_EST` | `0.015` | ✏️ | Edge assumed over the mid. Entry needs `mid + edge − ask − fee > 0`. Higher = looser. |
 | `MAX_POSITION_USD` | `10` | ✏️ | Hard cap per trade. |
+| `FAV_MIN_SIZE_ONLY` / `FAV_MIN_SIZE_BUFFER` | `false` / `0.03` | read-only | Stake only the market minimum (5 shares × ask, +3% buffer), never above `MAX_POSITION_USD`. At 82–92¢ that is ~$4.28–4.74 instead of $4.80: losses ~9% smaller ($4.39 vs $4.80 avg), total profit ~6% smaller (Oct 2026 backtest). |
 | `MAX_POSITION_PCT` / `KELLY_FRACTION` | `0.02` / `0.25` | read-only | Per-trade % of bankroll and Kelly fraction caps. |
 | `MAX_OPEN_POSITIONS` | `2` | ✏️ | Concurrent positions. |
 | `MAX_TRADES_PER_DAY` | `20` | ✏️ | Entries per UTC day. |

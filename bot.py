@@ -179,6 +179,12 @@ class Config:
     # --- risk controls ---
     max_position_pct: float = _env("MAX_POSITION_PCT", 0.02)      # 2% of bankroll per trade
     max_position_usd: float = _env("MAX_POSITION_USD", 10.0)
+    # Min-size stakes: spend only what the market's minimum order needs (orderMinSize shares x ask, plus
+    # FAV_MIN_SIZE_BUFFER for price moves before the fill) instead of the full MAX_POSITION_USD. At 82-92c with
+    # the 5-share minimum that is ~$4.20-4.75 instead of $4.80. Off by default. Backtest (Sep 26-Oct 18 2026,
+    # /workspace/bt_loss): average loss $4.39 vs $4.80 (-9%), total profit ~6% lower.
+    fav_min_size_only: bool = _env("FAV_MIN_SIZE_ONLY", False)
+    fav_min_size_buffer: float = _env("FAV_MIN_SIZE_BUFFER", 0.03)
     kelly_fraction: float = _env("KELLY_FRACTION", 0.25)
     max_total_btc_exposure_pct: float = _env("MAX_TOTAL_BTC_EXPOSURE_PCT", 0.05)
     max_net_direction_pct: float = _env("MAX_NET_DIRECTION_PCT", 0.04)
@@ -1595,6 +1601,9 @@ def size_usd(cfg: "Config", *, bank: float, p_side: float, price: float, total_e
     usd = min(usd, cfg.max_net_direction_pct * bank - max(0.0, same_dir_exposure))
     if usd < max(min_order_usd, 1.0):
         return 0.0, f"size ${usd:.2f} below minimum (${max(min_order_usd, 1.0):.2f}) / exposure caps"
+    if getattr(cfg, "fav_min_size_only", False):
+        floor = max(min_order_usd, 1.0)
+        usd = min(usd, math.ceil(floor * (1 + max(0.0, cfg.fav_min_size_buffer)) * 100) / 100)
     return round(usd, 2), "ok"
 
 
