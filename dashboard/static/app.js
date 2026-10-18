@@ -294,7 +294,9 @@ function dash() {
       const basis = (p.cost_usd && p.shares) ? Number(p.cost_usd) / Number(p.shares) : Number(p.entry_price);
       const slp = Number(this.cfgVal('STOP_LOSS_PCT') ?? 0.6), sl = basis * (1 - slp), tp = Number(this.cfgVal('TAKE_PROFIT_MIN_BID') ?? 0.97);
       const e = Number(p.entry_price), m = p.mark == null ? null : Number(p.mark), up = m != null && m >= e;
-      return { sl, tp, e, m, up, slX: cl(sl), tpX: cl(tp), eX: cl(e), mX: m == null ? null : cl(m),
+      const hasSL = slp > 0, tpLX = Math.min(cl(tp), 94), near = (a, b) => Math.abs(a - b) < 16;
+      const eLow = near(cl(e), tpLX) || (hasSL && near(cl(e), cl(sl)));
+      return { sl, tp, e, m, up, hasSL, eLow, slX: cl(sl), tpX: cl(tp), eX: cl(e), mX: m == null ? null : cl(m),
         fillL: m == null ? cl(e) : Math.min(cl(e), cl(m)), fillW: m == null ? 0 : Math.abs(cl(m) - cl(e)) };
     },
     tradeRowClass(t) { if (this.isFalse(t.ok) || t.action === 'BUY') return ''; const p = Number(t.pnl); return t.pnl === '' || t.pnl == null ? '' : (p > 0 ? 'win' : 'loss'); },

@@ -331,17 +331,17 @@ tailwind.config = { theme: { extend: {
               </div>
             </div>
             <!-- entry vs stop-loss vs take-profit vs now -->
-            <div class="mt-9 mb-7 mx-1" x-show="p.mark!=null" role="img" :aria-label="`Price ${cents(p.mark)}; entry ${cents(p.entry_price)}; stop-loss ${cents(posTrack(p).sl)}; take-profit ${cents(posTrack(p).tp)}`">
+            <div class="mt-9 mb-10 mx-1" x-show="p.mark!=null" role="img" :aria-label="`Price ${cents(p.mark)}; entry ${cents(p.entry_price)}; stop-loss ${posTrack(p).hasSL ? cents(posTrack(p).sl) : 'off'}; take-profit ${cents(posTrack(p).tp)}`">
               <div class="track">
                 <div class="track-fill" :class="posTrack(p).up ? 'bg-[#2ef2a4]/70 shadow-[0_0_12px_#2ef2a4]' : 'bg-[#ff4d7d]/70 shadow-[0_0_12px_#ff4d7d]'" :style="`left:${posTrack(p).fillL}%;width:${posTrack(p).fillW}%`"></div>
-                <div class="track-tick bg-[#ff4d7d]" :style="`left:${posTrack(p).slX}%`"></div>
+                <div class="track-tick bg-[#ff4d7d]" x-show="posTrack(p).hasSL" :style="`left:${posTrack(p).slX}%`"></div>
                 <div class="track-tick bg-white/80" :style="`left:${posTrack(p).eX}%`"></div>
                 <div class="track-tick bg-[#2ef2a4]" :style="`left:${posTrack(p).tpX}%`"></div>
                 <div class="track-mark" :class="posTrack(p).up ? 'up' : 'down'" :style="`left:${posTrack(p).mX}%`"></div>
                 <div class="track-bubble" :class="posTrack(p).up ? 'bg-[#2ef2a4] text-[#032016]' : 'bg-[#ff4d7d] text-white'" :style="`left:${posTrack(p).mX}%`" x-text="'now ' + cents(p.mark)"></div>
-                <div class="track-label text-[#ff8aa8]" :style="`left:${posTrack(p).slX}%`" x-text="'SL ' + cents(posTrack(p).sl)"></div>
-                <div class="track-label text-slate-200" :style="`left:${posTrack(p).eX}%`" x-text="'entry ' + cents(p.entry_price)"></div>
-                <div class="track-label text-[#2ef2a4]" :style="`left:${Math.min(posTrack(p).tpX, 94)}%`" x-text="'TP ' + cents(posTrack(p).tp)"></div>
+                <div class="track-label text-[#ff8aa8]" x-show="posTrack(p).hasSL" :style="`left:${posTrack(p).slX}%`" x-text="'SL ' + cents(posTrack(p).sl)"></div>
+                <div class="track-label text-slate-200" :class="posTrack(p).eLow && 'track-label-low'" :style="`left:${posTrack(p).eX}%`" x-text="'entry ' + cents(p.entry_price)"></div>
+                <div class="track-label text-[#2ef2a4]" :style="`left:${Math.min(posTrack(p).tpX, 94)}%`" x-text="posTrack(p).tp >= 0.99 ? 'settle $1' : 'TP ' + cents(posTrack(p).tp)"></div>
               </div>
             </div>
             <div class="grid grid-cols-4 gap-2 text-xs">

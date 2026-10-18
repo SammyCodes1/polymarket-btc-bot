@@ -162,6 +162,7 @@ header, main, footer, .banners { position: relative; z-index: 1; }
 .track-mark.up { background: var(--up); box-shadow: 0 0 0 4px rgba(46,242,164,.18), 0 0 18px var(--up); }
 .track-mark.down { background: var(--down); box-shadow: 0 0 0 4px rgba(255,77,125,.18), 0 0 18px var(--down); }
 .track-bubble { position: absolute; bottom: 20px; transform: translateX(-50%); font-size: 11px; font-weight: 800; padding: .15rem .45rem; border-radius: .45rem; white-space: nowrap; transition: left .6s ease; }
+.track-label-low { top: 31px !important; }
 .track-label { position: absolute; top: 16px; transform: translateX(-50%); font-size: 10.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* ---------- countdown ring ---------- */
