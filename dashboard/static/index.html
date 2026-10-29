@@ -3,100 +3,125 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#04050d" />
+<meta name="theme-color" content="#0b0e13" />
 <title>BTC Up/Down Bot · Dashboard</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238b5cf6'/><stop offset='1' stop-color='%2322d3ee'/></linearGradient></defs><rect width='32' height='32' rx='9' fill='url(%23g)'/><text x='16' y='23' font-size='19' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>₿</text></svg>" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%231a2233'/><text x='16' y='23' font-size='19' text-anchor='middle' fill='%237d97ff' font-family='Arial' font-weight='bold'>₿</text></svg>" />
 <link rel="preload" href="/static/vendor/fonts/inter-latin-wght.woff2" as="font" type="font/woff2" crossorigin />
 <script src="/static/vendor/tailwind.js"></script>
 <script>
 tailwind.config = { theme: { extend: {
   fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'Roboto', 'sans-serif'],
-                mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'] },
-  colors: { ink: { 950: '#04050d', 900: '#080b1a', 850: '#0d1126', 800: '#121735', 700: '#1b2148', 600: '#2a3163', 500: '#3c4580' },
-            up: '#2ef2a4', down: '#ff4d7d', brand: { violet: '#8b5cf6', cyan: '#22d3ee' } }
+                mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'] }
 }}}
 </script>
-<link rel="stylesheet" href="/static/app.css?v=3" />
+<link rel="stylesheet" href="/static/app.css?v=6" />
 <script defer src="/static/vendor/chart.umd.min.js"></script>
 <script defer src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
-<script defer src="/static/app.js?v=3"></script>
+<script defer src="/static/app.js?v=6"></script>
 <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
-<body class="min-h-full text-slate-200 font-sans antialiased" x-data="dash()" x-init="init()">
-<div class="bg-aurora" aria-hidden="true"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
-<div class="bg-grid" aria-hidden="true"></div>
+<body class="min-h-full font-sans antialiased" x-data="dash()" x-init="init()">
 
-<!-- ============================== HEADER ============================== -->
-<header class="sm:sticky top-0 z-30 border-b border-white/[0.06] bg-[#04050d]/70 backdrop-blur-xl">
-  <div class="mx-auto max-w-[1440px] px-4 sm:px-6 py-3 flex flex-wrap items-center gap-x-4 gap-y-3">
-    <div class="flex items-center gap-3 min-w-0">
-      <div class="logo h-10 w-10 rounded-xl text-lg" aria-hidden="true"><span>₿</span></div>
-      <div class="leading-tight">
-        <div class="font-extrabold text-[15.5px] tracking-tight grad-text">BTC Up/Down Bot</div>
-        <div class="text-[11.5px] text-[#8390b0]">Polymarket · 15m favorite strategy</div>
+<!-- ============================== TOP BAR ============================== -->
+<header class="topbar">
+  <div class="wrap flex items-center gap-3 h-14">
+    <div class="flex items-center gap-2.5 min-w-0">
+      <div class="logo" aria-hidden="true">₿</div>
+      <div class="leading-tight min-w-0">
+        <div class="brand-name truncate">BTC Up/Down Bot</div>
+        <div class="brand-sub hidden sm:block">Polymarket · 15m favorite strategy</div>
       </div>
     </div>
+    <nav class="tabs ml-auto" aria-label="Sections" x-show="!showSetup()">
+      <button class="tab" :class="tab==='overview' && 'tab-on'" :aria-current="tab==='overview' ? 'page' : null" @click="tab='overview'">Overview</button>
+      <button class="tab" :class="tab==='settings' && 'tab-on'" :aria-current="tab==='settings' ? 'page' : null" @click="tab='settings'; loadConfig()">Settings</button>
+    </nav>
+  </div>
+</header>
 
-    <div class="flex items-center gap-2 flex-wrap" role="status" aria-live="polite">
+<main class="wrap py-4 sm:py-6 space-y-4 sm:space-y-5">
+
+<!-- Banners -->
+<div class="banners space-y-2" x-show="offline || cfg.mode==='LIVE_NOT_ARMED' || proc.kill_file_present || (!proc.running && proc.last_stderr) || (proc.op_message && !proc.op)">
+  <template x-if="offline"><div class="banner banner-red" role="alert">Can't reach the dashboard server. Is <span class="font-mono">python dashboard/server.py</span> still running?</div></template>
+  <template x-if="cfg.mode==='LIVE_NOT_ARMED'"><div class="banner banner-amber">DRY_RUN is off but live trading isn't armed (LIVE_TRADING_CONFIRM missing), so the bot will refuse to start. Switch to Live in Settings (typed confirmation) or back to Paper.</div></template>
+  <template x-if="proc.kill_file_present"><div class="banner banner-red" role="alert">KILL file present: the bot halts and flattens on its next loop and won't start until you use <b>Clear halt</b>.</div></template>
+  <template x-if="!proc.running && proc.last_stderr"><div class="banner banner-amber"><div class="font-semibold mb-1">Last run ended with output on stderr:</div><pre class="font-mono text-[11px] whitespace-pre-wrap opacity-80" x-text="proc.last_stderr"></pre></div></template>
+  <template x-if="proc.op_message && !proc.op"><div class="banner banner-slate flex items-center"><span x-text="proc.op_message"></span><button class="ml-auto muted hover:text-white" aria-label="Dismiss" @click="proc.op_message=''">✕</button></div></template>
+</div>
+
+<!-- ============================== SUMMARY STRIP (all tabs) ============================== -->
+<section class="card summary" x-show="!showSetup()">
+  <div class="summary-top">
+    <div class="flex items-center gap-2 flex-wrap min-w-0" role="status" aria-live="polite">
       <span class="pill" :class="statusPill().cls" :title="state.halted ? state.halt_reason : 'Trading mode'">
-        <span class="dot" :class="statusPill().pulse && 'pulse'"></span>
-        <span x-text="statusPill().label"></span>
+        <span class="dot" :class="statusPill().pulse && 'pulse'"></span><span x-text="statusPill().label"></span>
       </span>
       <span class="pill" :class="proc.running ? 'pill-green' : 'pill-muted'">
         <span class="dot" :class="proc.running && 'pulse'"></span>
         <span x-text="proc.op ? (proc.op === 'stop' ? 'Stopping…' : 'Restarting…') : (proc.running ? 'Running' : 'Stopped')"></span>
       </span>
-      <span class="hidden xl:inline text-xs text-[#8390b0]" x-show="proc.running">
-        pid <span class="font-mono text-slate-300" x-text="proc.pid"></span> · up <span class="text-slate-300" x-text="dur(proc.uptime_s)"></span>
-        · heartbeat <span :class="heartbeatStale() ? 'text-amber-300' : 'text-slate-300'" x-text="ago(proc.last_log_at)"></span>
-      </span>
     </div>
-
-    <div class="flex items-center gap-1.5 sm:gap-2 w-full sm:w-auto sm:ml-auto" x-show="!showSetup()">
-    <nav class="tabs" aria-label="Sections">
-      <button class="tab" :class="tab==='overview' && 'tab-on'" :aria-current="tab==='overview' ? 'page' : null" @click="tab='overview'">Overview</button>
-      <button class="tab" :class="tab==='settings' && 'tab-on'" :aria-current="tab==='settings' ? 'page' : null" @click="tab='settings'; loadConfig()">Settings</button>
-    </nav>
-
-    <div class="flex items-center gap-1.5 sm:gap-2 ml-auto">
-      <button class="btn btn-green w-9 px-0 sm:w-auto sm:px-[.95rem]" aria-label="Start" :disabled="proc.running || !!proc.op || busy" @click="startBot()">
+    <div class="flex items-center gap-1.5 ml-auto">
+      <button class="btn btn-start btn-icon" aria-label="Start" :disabled="proc.running || !!proc.op || busy" @click="startBot()">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M6.3 2.84A1.5 1.5 0 0 0 4 4.11v11.78a1.5 1.5 0 0 0 2.3 1.27l9.34-5.89a1.5 1.5 0 0 0 0-2.54L6.3 2.84Z"/></svg><span class="hidden sm:inline">Start</span></button>
-      <button class="btn btn-ghost w-9 px-0 sm:w-auto sm:px-[.95rem]" aria-label="Stop" :disabled="!proc.running || !!proc.op || busy" @click="stopBot()">
+      <button class="btn btn-ghost btn-icon" aria-label="Stop" :disabled="!proc.running || !!proc.op || busy" @click="stopBot()">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1.5"/></svg><span class="hidden sm:inline">Stop</span></button>
-      <button class="btn btn-ghost w-9 px-0 sm:w-auto sm:px-[.95rem]" aria-label="Restart" :disabled="!!proc.op || busy" @click="restartBot()">
+      <button class="btn btn-ghost btn-icon" aria-label="Restart" :disabled="!!proc.op || busy" @click="restartBot()">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M15.5 8A6 6 0 1 0 16 11" stroke-linecap="round"/><path d="M16 4v4h-4" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="hidden sm:inline">Restart</span></button>
       <div class="relative" x-data="{o:false}" @click.outside="o=false" @keydown.escape="o=false">
-        <button class="btn btn-ghost w-9 px-0" @click="o=!o" title="More controls" aria-label="More controls" :aria-expanded="o">
+        <button class="btn btn-ghost btn-sq" @click="o=!o" title="More controls" aria-label="More controls" :aria-expanded="o">
           <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><circle cx="4" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="16" cy="10" r="1.6"/></svg></button>
-        <div x-show="o" x-transition.opacity.scale.origin.top.right class="menu absolute right-0 mt-2 w-72 rounded-2xl shadow-2xl p-1.5 z-40" style="display:none">
-          <button class="menu-item" @click="o=false; forceKill()"><span class="text-rose-300">Force kill</span><span class="menu-sub">End the process now. Positions stay open.</span></button>
-          <button class="menu-item" @click="o=false; haltBot()"><span class="text-rose-300">Emergency halt &amp; flatten</span><span class="menu-sub">Creates the KILL file: the bot sells open positions and stops entering.</span></button>
-          <button class="menu-item" @click="o=false; clearHalt()"><span class="text-slate-100">Clear halt</span><span class="menu-sub">Remove KILL file and reset a halt (bot must be stopped).</span></button>
+        <div x-show="o" x-transition.opacity.origin.top.right class="menu absolute right-0 mt-2 w-72 max-w-[calc(100vw-2rem)] rounded-xl p-1.5 z-40" style="display:none">
+          <button class="menu-item" @click="o=false; forceKill()"><span class="down">Force kill</span><span class="menu-sub">End the process now. Positions stay open.</span></button>
+          <button class="menu-item" @click="o=false; haltBot()"><span class="down">Emergency halt &amp; flatten</span><span class="menu-sub">Creates the KILL file: the bot sells open positions and stops entering.</span></button>
+          <button class="menu-item" @click="o=false; clearHalt()"><span>Clear halt</span><span class="menu-sub">Remove KILL file and reset a halt (bot must be stopped).</span></button>
         </div>
       </div>
     </div>
+  </div>
+  <div class="summary-meta" x-show="proc.running">
+    pid <span class="mono" x-text="proc.pid"></span> · up <span x-text="dur(proc.uptime_s)"></span>
+    · heartbeat <span :class="heartbeatStale() ? 'warn' : ''" x-text="ago(proc.last_log_at)"></span>
+  </div>
+
+  <div class="metrics">
+    <div class="metric metric-main">
+      <div class="eyebrow flex items-center gap-2">Bankroll
+        <template x-if="dayChange() != null"><span class="chip" :class="dayChange() >= 0 ? 'chip-up' : 'chip-down'" x-text="(dayChange() >= 0 ? '▲ ' : '▼ ') + pctOf(dayChange(), state.day_start_bankroll_usd) + ' today'"></span></template>
+      </div>
+      <div class="m-hero" x-effect="countUp($el, state.available ? state.bankroll_usd : null, 'hero')">—</div>
+      <div class="m-sub">
+        <span>peak <b x-text="state.available ? usd(state.peak_bankroll_usd) : '—'"></b></span>
+        <template x-if="state.available && state.cash_usd != null"><span>cash <b x-text="usd(state.cash_usd)"></b></span></template>
+        <template x-if="pendingCount()"><span class="warn"><span x-text="pendingCount()"></span> to redeem</span></template>
+      </div>
+    </div>
+    <div class="metric">
+      <div class="eyebrow">Today's P&amp;L</div>
+      <div class="m-val" :class="pnlClass(state.realized_pnl_day)" x-effect="countUp($el, state.available ? state.realized_pnl_day : null, 'sgn')">—</div>
+      <div class="m-sub"><span x-text="pctOf(state.realized_pnl_day, state.day_start_bankroll_usd)"></span></div>
+    </div>
+    <div class="metric">
+      <div class="eyebrow">Total P&amp;L</div>
+      <div class="m-val" :class="pnlClass(state.realized_pnl_total)" x-effect="countUp($el, state.available ? state.realized_pnl_total : null, 'sgn')">—</div>
+      <div class="m-sub"><span>open <b :class="pnlClass(unrealized)" x-text="positions.length ? sgnUsd(unrealized) : '—'"></b></span></div>
+    </div>
+    <div class="metric">
+      <div class="eyebrow">Win rate</div>
+      <div class="m-val" x-text="stats.win_rate==null ? '—' : (stats.win_rate*100).toFixed(0)+'%'"></div>
+      <div class="m-sub"><span class="up" x-text="(stats.wins||0)+'W'"></span><span class="down" x-text="(stats.losses||0)+'L'"></span></div>
     </div>
   </div>
-</header>
-
-<!-- Banners -->
-<div class="banners mx-auto max-w-[1440px] px-4 sm:px-6 mt-4 space-y-2">
-  <template x-if="offline"><div class="banner banner-red" role="alert">Can't reach the dashboard server. Is <span class="font-mono">python dashboard/server.py</span> still running?</div></template>
-  <template x-if="cfg.mode==='LIVE_NOT_ARMED'"><div class="banner banner-amber">DRY_RUN is off but live trading isn't armed (LIVE_TRADING_CONFIRM missing), so the bot will refuse to start. Switch to Live in Settings (typed confirmation) or back to Paper.</div></template>
-  <template x-if="proc.kill_file_present"><div class="banner banner-red" role="alert">KILL file present: the bot halts and flattens on its next loop and won't start until you use <b>Clear halt</b>.</div></template>
-  <template x-if="!proc.running && proc.last_stderr"><div class="banner banner-amber"><div class="font-semibold mb-1">Last run ended with output on stderr:</div><pre class="font-mono text-[11px] whitespace-pre-wrap text-amber-100/80" x-text="proc.last_stderr"></pre></div></template>
-  <template x-if="proc.op_message && !proc.op"><div class="banner banner-slate flex items-center"><span x-text="proc.op_message"></span><button class="ml-auto text-slate-400 hover:text-white" aria-label="Dismiss" @click="proc.op_message=''">✕</button></div></template>
-</div>
-
-<main class="mx-auto max-w-[1440px] px-4 sm:px-6 py-5 space-y-5">
+</section>
 
 <!-- ============================== FIRST-RUN SETUP ============================== -->
 <section x-show="showSetup()" style="display:none" class="max-w-[900px] mx-auto">
   <div class="text-center mt-6 mb-9 rise">
-    <div class="logo mx-auto h-16 w-16 rounded-2xl text-3xl" aria-hidden="true"><span>₿</span></div>
+    <div class="logo logo-lg mx-auto" aria-hidden="true">₿</div>
     <div class="mt-5 inline-flex pill pill-violet"><span class="dot pulse"></span>First-run setup · about a minute</div>
-    <h1 class="mt-4 text-[34px] sm:text-[42px] font-extrabold tracking-tight leading-[1.05]"><span class="grad-text">Set up your bot</span></h1>
-    <p class="mt-3 text-[#9aa5c4] text-[15px] max-w-[560px] mx-auto">Connect your Polymarket wallet, pick a mode and a few limits, then start.</p>
+    <h1 class="mt-4 text-[34px] sm:text-[42px] font-extrabold tracking-tight leading-[1.05]"><span class="">Set up your bot</span></h1>
+    <p class="mt-3 text-[#9aa3b2] text-[15px] max-w-[560px] mx-auto">Connect your Polymarket wallet, pick a mode and a few limits, then start.</p>
   </div>
 
   <div class="banner banner-amber mb-5 text-[13px] leading-relaxed rise rise-1">
@@ -104,7 +129,7 @@ tailwind.config = { theme: { extend: {
   </div>
 
   <!-- Step 1: wallet -->
-  <div class="card glow-border mb-5 rise rise-2">
+  <div class="card mb-5 rise rise-2">
     <div class="card-head"><div class="flex items-center gap-3"><span class="step">1</span><div><div class="card-title">Your Polymarket wallet</div><div class="card-sub">Needed for live trading. Stored only in the local <span class="font-mono">.env</span> file on this computer.</div></div></div></div>
     <div class="px-5 pb-5 space-y-4">
       <div>
@@ -113,14 +138,14 @@ tailwind.config = { theme: { extend: {
           <input id="pk" :type="setupForm.showKey ? 'text' : 'password'" autocomplete="off" spellcheck="false" class="field font-mono pr-20" :class="setupForm.private_key && !keyOk() ? 'field-bad' : ''" placeholder="0x… (64 hex characters)" x-model="setupForm.private_key">
           <button type="button" class="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-semibold text-slate-300 hover:text-white px-2.5 py-1 rounded-lg bg-white/[0.06] hover:bg-white/10" @click="setupForm.showKey=!setupForm.showKey" x-text="setupForm.showKey ? 'Hide' : 'Show'"></button>
         </div>
-        <div class="mt-1.5 text-[11.5px]" :class="setupForm.private_key && !keyOk() ? 'text-rose-300' : 'text-[#8390b0]'" x-text="setupForm.private_key && !keyOk() ? 'Expected 64 hex characters, optionally starting with 0x.' : 'The signer key for the wallet you use on Polymarket. Use a dedicated wallet holding only funds you can afford to lose.'"></div>
+        <div class="mt-1.5 text-[11.5px]" :class="setupForm.private_key && !keyOk() ? 'text-rose-300' : 'text-[#6f7a8c]'" x-text="setupForm.private_key && !keyOk() ? 'Expected 64 hex characters, optionally starting with 0x.' : 'The signer key for the wallet you use on Polymarket. Use a dedicated wallet holding only funds you can afford to lose.'"></div>
       </div>
       <div>
         <label class="text-[13px] font-semibold text-slate-100" for="addr">Polymarket wallet address</label>
         <input id="addr" autocomplete="off" spellcheck="false" class="field font-mono mt-1.5" :class="setupForm.wallet_address && !addrOk() ? 'field-bad' : ''" placeholder="0x… (40 hex characters)" x-model="setupForm.wallet_address">
-        <div class="mt-1.5 text-[11.5px]" :class="setupForm.wallet_address && !addrOk() ? 'text-rose-300' : 'text-[#8390b0]'" x-text="setupForm.wallet_address && !addrOk() ? 'Expected 0x followed by 40 hex characters.' : 'Your Polymarket account (deposit/proxy) wallet address, the one that holds your funds on Polymarket.'"></div>
+        <div class="mt-1.5 text-[11.5px]" :class="setupForm.wallet_address && !addrOk() ? 'text-rose-300' : 'text-[#6f7a8c]'" x-text="setupForm.wallet_address && !addrOk() ? 'Expected 0x followed by 40 hex characters.' : 'Your Polymarket account (deposit/proxy) wallet address, the one that holds your funds on Polymarket.'"></div>
       </div>
-      <details class="rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[12.5px] text-[#9aa5c4] leading-relaxed">
+      <details class="rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[12.5px] text-[#9aa3b2] leading-relaxed">
         <summary class="cursor-pointer text-slate-200 font-semibold">Where do I find these?</summary>
         <ul class="mt-2 space-y-1.5 list-disc pl-5">
           <li><b class="text-slate-200">Wallet address:</b> on polymarket.com, open your profile menu and copy your account wallet address. This is the address that holds your Polymarket balance.</li>
@@ -139,14 +164,14 @@ tailwind.config = { theme: { extend: {
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <button type="button" class="mode-card" :class="setupForm.mode==='paper' ? 'mode-on-paper' : ''" :aria-pressed="setupForm.mode==='paper'" @click="setupForm.mode='paper'">
           <div class="flex items-center gap-2"><span class="dot text-amber-300"></span><span class="font-bold text-white">Paper</span><span class="ml-auto text-[10px] font-bold uppercase tracking-wider text-amber-300">recommended</span></div>
-          <div class="mt-1.5 text-[12.5px] text-[#9aa5c4]">Simulated fills against the live order book. No real orders, no money at risk.</div>
+          <div class="mt-1.5 text-[12.5px] text-[#9aa3b2]">Simulated fills against the live order book. No real orders, no money at risk.</div>
         </button>
         <button type="button" class="mode-card" :class="setupForm.mode==='live' ? 'mode-on-live' : ''" :aria-pressed="setupForm.mode==='live'" @click="setupForm.mode='live'">
-          <div class="flex items-center gap-2"><span class="dot text-[#ff4d7d]"></span><span class="font-bold text-white">Live</span><span class="ml-auto text-[10px] font-bold uppercase tracking-wider text-[#ff8aa8]">real money</span></div>
-          <div class="mt-1.5 text-[12.5px] text-[#9aa5c4]">Places real orders with your wallet's funds (pUSD). Losses are real.</div>
+          <div class="flex items-center gap-2"><span class="dot text-[#f87171]"></span><span class="font-bold text-white">Live</span><span class="ml-auto text-[10px] font-bold uppercase tracking-wider text-[#fca5a5]">real money</span></div>
+          <div class="mt-1.5 text-[12.5px] text-[#9aa3b2]">Places real orders with your wallet's funds (pUSD). Losses are real.</div>
         </button>
       </div>
-      <div x-show="setupForm.mode==='live'" x-transition class="mt-4 rounded-xl border border-[#ff4d7d]/30 bg-[#ff4d7d]/[0.06] p-4 space-y-3" style="display:none">
+      <div x-show="setupForm.mode==='live'" x-transition class="mt-4 rounded-xl border border-[#f87171]/30 bg-[#f87171]/[0.06] p-4 space-y-3" style="display:none">
         <div>
           <label class="text-xs text-rose-200" for="golive">Type <span class="font-mono text-white">GO LIVE</span> to enable real-money trading</label>
           <input id="golive" class="field mt-1.5 font-mono" x-model="setupForm.live_confirmation" placeholder="GO LIVE">
@@ -167,20 +192,20 @@ tailwind.config = { theme: { extend: {
         <div>
           <label class="text-[12px] font-semibold text-slate-200" :for="'s_'+k" x-text="setup.starter[k].label"></label>
           <input :id="'s_'+k" type="number" class="field py-1.5 mt-1" :min="setup.starter[k].min" :max="setup.starter[k].max" :step="setup.starter[k].step" x-model="setupForm.settings[k]">
-          <div class="mt-1 text-[11px] font-semibold text-[#a78bfa]" x-text="hintFor(k, setupForm.settings[k])"></div>
+          <div class="mt-1 text-[11px] font-semibold text-[#93a8ff]" x-text="hintFor(k, setupForm.settings[k])"></div>
         </div>
       </template>
     </div>
-    <div class="px-5 pb-5 -mt-1 text-[12px] text-[#8390b0]">Each trade is also capped at 2% of your bankroll and Polymarket's minimum order is 5 shares, so with the defaults you need roughly <b class="text-slate-200">$250+</b> before the bot can place a trade. Change <span class="font-mono">MAX_POSITION_PCT</span> in .env only if you accept bigger bets.</div>
+    <div class="px-5 pb-5 -mt-1 text-[12px] text-[#6f7a8c]">Each trade is also capped at 2% of your bankroll and Polymarket's minimum order is 5 shares, so with the defaults you need roughly <b class="text-slate-200">$250+</b> before the bot can place a trade. Change <span class="font-mono">MAX_POSITION_PCT</span> in .env only if you accept bigger bets.</div>
   </div>
 
   <div class="flex flex-col md:flex-row md:items-center gap-4 mb-3">
-    <div class="flex items-start gap-2 text-[12px] text-[#8390b0] max-w-[480px]">
-      <svg class="h-4 w-4 shrink-0 mt-px text-[#2ef2a4]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M10 1.5 3 4.5v5c0 4.3 3 7.6 7 9 4-1.4 7-4.7 7-9v-5l-7-3Zm3.2 6.3a.75.75 0 0 0-1.2-.9L9.2 10.6 7.9 9.3a.75.75 0 1 0-1.06 1.06l1.9 1.9a.75.75 0 0 0 1.13-.08l3.33-4.38Z" clip-rule="evenodd"/></svg>
+    <div class="flex items-start gap-2 text-[12px] text-[#6f7a8c] max-w-[480px]">
+      <svg class="h-4 w-4 shrink-0 mt-px text-[#34d399]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M10 1.5 3 4.5v5c0 4.3 3 7.6 7 9 4-1.4 7-4.7 7-9v-5l-7-3Zm3.2 6.3a.75.75 0 0 0-1.2-.9L9.2 10.6 7.9 9.3a.75.75 0 1 0-1.06 1.06l1.9 1.9a.75.75 0 0 0 1.13-.08l3.33-4.38Z" clip-rule="evenodd"/></svg>
       <span>Your key is saved only to <span class="font-mono text-slate-300">.env</span> on this computer (git-ignored, owner-only permissions). It is never shown again, logged, or sent anywhere except to sign your own Polymarket orders.</span>
     </div>
     <div class="md:ml-auto flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-3">
-      <button type="button" class="text-[13px] text-[#9aa5c4] hover:text-white underline-offset-4 hover:underline" @click="skipSetup()" :disabled="busy">Skip, explore in paper mode</button>
+      <button type="button" class="text-[13px] text-[#9aa3b2] hover:text-white underline-offset-4 hover:underline" @click="skipSetup()" :disabled="busy">Skip, explore in paper mode</button>
       <button type="button" class="btn btn-green h-11 px-6 text-[14px]" :disabled="!setupReady() || busy" @click="saveSetup()">
         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M6.3 2.84A1.5 1.5 0 0 0 4 4.11v11.78a1.5 1.5 0 0 0 2.3 1.27l9.34-5.89a1.5 1.5 0 0 0 0-2.54L6.3 2.84Z"/></svg>
         <span x-text="busy ? 'Saving…' : (setupForm.mode==='live' ? 'Save & Start live' : 'Save & Start')"></span></button>
@@ -189,172 +214,60 @@ tailwind.config = { theme: { extend: {
 </section>
 
 <!-- ============================== OVERVIEW ============================== -->
-<section x-show="tab==='overview' && !showSetup()" class="space-y-5">
+<section x-show="tab==='overview' && !showSetup()" class="space-y-4 sm:space-y-5">
 
-  <!-- Hero: bankroll + P&L + window countdown -->
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-    <div class="card glow-border hero lg:col-span-2 p-5 sm:p-7 rise">
-      <div class="relative z-[1] flex flex-col sm:flex-row sm:items-end gap-6 sm:gap-10">
-        <div class="min-w-0">
-          <div class="eyebrow flex items-center gap-2">Bankroll
-            <template x-if="dayChange() != null"><span class="normal-case tracking-normal text-[11.5px] font-bold px-2 py-0.5 rounded-full" :class="dayChange() >= 0 ? 'bg-[#2ef2a4]/10 text-[#2ef2a4]' : 'bg-[#ff4d7d]/10 text-[#ff7a9c]'" x-text="(dayChange() >= 0 ? '▲ ' : '▼ ') + pctOf(dayChange(), state.day_start_bankroll_usd) + ' today'"></span></template>
-          </div>
-          <div class="hero-num mt-2 text-white" x-effect="countUp($el, state.available ? state.bankroll_usd : null, 'hero')">—</div>
-          <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12.5px] text-[#8390b0]">
-            <span>peak <b class="text-slate-200 font-semibold" x-text="state.available ? usd(state.peak_bankroll_usd) : '—'"></b></span>
-            <template x-if="state.available && state.cash_usd != null"><span>cash <b class="text-slate-200 font-semibold" x-text="usd(state.cash_usd)"></b></span></template>
-            <template x-if="pendingCount()"><span class="text-amber-300"><span x-text="pendingCount()"></span> to redeem</span></template>
-          </div>
-        </div>
-        <div class="sm:ml-auto grid grid-cols-2 gap-6 sm:gap-10">
-          <div>
-            <div class="eyebrow">Today's P&amp;L</div>
-            <div class="hero-mid mt-2" :class="pnlClass(state.realized_pnl_day)" x-effect="countUp($el, state.available ? state.realized_pnl_day : null, 'sgn')">—</div>
-            <div class="mt-1.5 text-[12px] text-[#8390b0]"><span x-text="pctOf(state.realized_pnl_day, state.day_start_bankroll_usd)"></span> · UTC <span x-text="state.day || '—'"></span></div>
-          </div>
-          <div>
-            <div class="eyebrow">Total P&amp;L</div>
-            <div class="hero-mid mt-2" :class="pnlClass(state.realized_pnl_total)" x-effect="countUp($el, state.available ? state.realized_pnl_total : null, 'sgn')">—</div>
-            <div class="mt-1.5 text-[12px] text-[#8390b0]">unrealized <span class="font-semibold" :class="pnlClass(unrealized)" x-text="positions.length ? sgnUsd(unrealized) : '—'"></span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 15m window countdown -->
-    <div class="card p-5 sm:p-6 flex items-center gap-5 rise rise-1">
-      <div class="relative h-[118px] w-[118px] shrink-0" role="img" :aria-label="'Current 15 minute window ends in ' + clock(windowInfo().left)">
-        <svg class="cd-ring h-full w-full" viewBox="0 0 120 120" aria-hidden="true">
-          <circle class="ring-bg" cx="60" cy="60" r="52" fill="none" stroke-width="9"/>
-          <circle class="ring-fg" cx="60" cy="60" r="52" fill="none" stroke-width="9" stroke-linecap="round"
-            :style="`color:${windowInfo().open ? '#2ef2a4' : '#8b5cf6'}`" stroke="currentColor"
-            stroke-dasharray="326.73" :stroke-dashoffset="326.73 * (1 - windowInfo().pct)"/>
-        </svg>
-        <div class="absolute inset-0 grid place-items-center text-center">
-          <div><div class="font-mono text-[24px] font-bold text-white tabular-nums leading-none" x-text="clock(windowInfo().left)"></div>
-            <div class="mt-1 text-[10px] uppercase tracking-[.14em] text-[#8390b0]">left</div></div>
-        </div>
-      </div>
-      <div class="min-w-0">
-        <div class="eyebrow">15m window</div>
-        <div class="mt-1 font-mono text-[15px] font-semibold text-slate-100" x-text="windowInfo().range"></div>
-        <div class="mt-3">
-          <span class="pill" :class="windowInfo().open ? 'pill-green' : 'pill-violet'"><span class="dot" :class="windowInfo().open && 'pulse'"></span><span x-text="windowInfo().open ? 'Entry window open' : 'Waiting'"></span></span>
-        </div>
-        <div class="mt-2 text-[12px] text-[#9aa5c4]">
-          <span x-text="windowInfo().open ? 'Entries close in ' : 'Next entry window in '"></span><b class="font-mono text-white" x-text="clock(windowInfo().nextIn)"></b>
-        </div>
-        <div class="mt-1 text-[11.5px] text-[#8390b0]">Band <span x-text="cents(cfgVal('FAV_MIN_PRICE'))"></span>–<span x-text="cents(cfgVal('FAV_MAX_PRICE'))"></span> · max <span x-text="usd(cfgVal('MAX_POSITION_USD'))"></span>/trade</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- KPI strip -->
-  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-    <div class="kpi rise rise-1">
-      <div class="flex items-center justify-between"><div class="kpi-label">Win rate</div><span class="icon-chip" aria-hidden="true"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 14l4-4 3 3 5-6" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
-      <div class="kpi-value" x-text="stats.win_rate==null ? '—' : (stats.win_rate*100).toFixed(0)+'%'"></div>
-      <div class="mt-2.5 flex h-1.5 rounded-full overflow-hidden bg-white/[0.06]" aria-hidden="true">
-        <div class="bg-[#2ef2a4] shadow-[0_0_10px_#2ef2a4] transition-all duration-700" :style="`width:${(stats.closed ? 100*(stats.wins||0)/stats.closed : 0)}%`"></div>
-        <div class="bg-[#ff4d7d] transition-all duration-700" :style="`width:${(stats.closed ? 100*(stats.losses||0)/stats.closed : 0)}%`"></div>
-      </div>
-      <div class="kpi-sub"><span class="text-[#2ef2a4] font-semibold" x-text="stats.wins||0"></span>W · <span class="text-[#ff7a9c] font-semibold" x-text="stats.losses||0"></span>L · <span x-text="stats.entries||0"></span> entries</div>
-    </div>
-    <div class="kpi rise rise-2">
-      <div class="flex items-center justify-between"><div class="kpi-label">Trades today</div><span class="icon-chip" aria-hidden="true"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 16V9M10 16V4M16 16v-5" stroke-linecap="round"/></svg></span></div>
-      <div class="kpi-value"><span x-text="state.available ? (state.trades_today ?? 0) : '—'"></span><span class="text-[#8390b0] text-lg font-semibold"> / <span x-text="cfgVal('MAX_TRADES_PER_DAY')"></span></span></div>
-      <div class="mt-2.5 h-1.5 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true"><div class="h-full rounded-full bg-gradient-to-r from-[#8b5cf6] to-[#22d3ee] shadow-[0_0_10px_#22d3ee] transition-all duration-700" :style="`width:${Math.min(100, 100*(state.trades_today||0)/Math.max(1,cfgVal('MAX_TRADES_PER_DAY')||1))}%`"></div></div>
-      <div class="kpi-sub">volume <span x-text="usd(stats.volume||0)"></span> · fees <span x-text="usd(stats.fees||0)"></span></div>
-    </div>
-    <div class="kpi rise rise-3">
-      <div class="flex items-center justify-between"><div class="kpi-label">Best / worst</div><span class="icon-chip" aria-hidden="true"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 3v14M5 8l5-5 5 5" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
-      <div class="kpi-value text-[22px]"><span :class="pnlClass(stats.best)" x-text="stats.best==null ? '—' : sgnUsd(stats.best)"></span> <span class="text-[#8390b0] text-base">/</span> <span :class="pnlClass(stats.worst)" x-text="stats.worst==null ? '—' : sgnUsd(stats.worst)"></span></div>
-      <div class="kpi-sub">avg win <span class="text-[#2ef2a4]" x-text="stats.avg_win==null ? '—' : sgnUsd(stats.avg_win)"></span> · avg loss <span class="text-[#ff7a9c]" x-text="stats.avg_loss==null ? '—' : sgnUsd(stats.avg_loss)"></span></div>
-    </div>
-    <div class="kpi rise rise-4" :class="state.halted ? '!border-[#ff4d7d]/50 shadow-[0_0_40px_-12px_rgba(255,77,125,.7)]' : ''">
-      <div class="flex items-center justify-between"><div class="kpi-label">Risk status</div><span class="icon-chip" :class="state.halted ? '!bg-[#ff4d7d]/15 !text-[#ff7a9c] !border-[#ff4d7d]/30' : '!bg-[#2ef2a4]/10 !text-[#2ef2a4] !border-[#2ef2a4]/25'" aria-hidden="true"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 1.5 3 4.5v5c0 4.3 3 7.6 7 9 4-1.4 7-4.7 7-9v-5l-7-3Z" clip-rule="evenodd"/></svg></span></div>
-      <div class="kpi-value text-[24px]" :class="state.halted ? 't-down' : 't-up'" x-text="!state.available ? '—' : (state.halted ? 'Halted' : 'Active')"></div>
-      <div class="kpi-sub truncate" :title="state.halt_reason" x-text="state.halted ? state.halt_reason : `${state.consecutive_losses||0} loss streak · DD limit ${pct(cfgVal('MAX_DRAWDOWN_PCT'))}`"></div>
-    </div>
-  </div>
-
-  <!-- Chart + positions -->
-  <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
-    <div class="card xl:col-span-2 rise rise-2">
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+    <!-- Active positions -->
+    <div class="card lg:col-span-7">
       <div class="card-head">
-        <div>
-          <div class="card-title">Cumulative realized P&amp;L</div>
-          <div class="card-sub"><span x-text="stats.closed||0"></span> closed trades · fees <span x-text="usd(stats.fees||0)"></span> · max drawdown <span x-text="sgnUsd(stats.max_drawdown||0)"></span></div>
-        </div>
-        <div class="tabs text-xs" role="group" aria-label="Chart mode">
-          <template x-for="m in ['auto','LIVE','PAPER','ALL']" :key="m">
-            <button class="tab !py-1 !px-2.5 !text-xs" :class="statsMode===m && 'tab-on'" :aria-pressed="statsMode===m" @click="statsMode=m; refreshStats()" x-text="m==='auto' ? 'Current' : m.charAt(0)+m.slice(1).toLowerCase()"></button>
-          </template>
-        </div>
+        <div><div class="card-title">Active positions</div><div class="card-sub">Marked at the live best bid</div></div>
+        <span class="pill pill-muted" x-text="positions.length + ' / ' + (cfgVal('MAX_OPEN_POSITIONS') ?? '—')"></span>
       </div>
-      <div class="px-5 -mt-1 mb-1 flex items-baseline gap-3">
-        <div class="text-[28px] font-extrabold tracking-tight tabular-nums" :class="pnlClass(stats.realized_pnl)" x-text="stats.realized_pnl==null ? '—' : sgnUsd(stats.realized_pnl)"></div>
-        <div class="text-[12px] text-[#8390b0]">realized in view</div>
-      </div>
-      <div class="relative h-[300px] px-3 pb-4">
-        <canvas id="pnlChart" aria-label="Cumulative realized profit and loss chart" role="img"></canvas>
-        <div x-show="(stats.series||[]).length < 2" class="empty absolute inset-0">
-          <svg class="h-9 w-9 text-[#8b5cf6]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <div>No closed trades yet. The curve appears after the first exit or resolution.</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card rise rise-3">
-      <div class="card-head">
-        <div><div class="card-title">Active positions</div><div class="card-sub">Marked at the live CLOB best bid</div></div>
-        <span class="pill pill-violet" x-text="positions.length + ' / ' + (cfgVal('MAX_OPEN_POSITIONS') ?? '—')"></span>
-      </div>
-      <div class="px-4 pb-4 space-y-3">
+      <div class="card-body space-y-3">
         <template x-for="p in positions" :key="p.key">
-          <div class="rounded-2xl border p-4 transition-colors" :class="(p.unrealized_pnl||0) >= 0 ? 'border-[#2ef2a4]/20 bg-[#2ef2a4]/[0.035]' : 'border-[#ff4d7d]/25 bg-[#ff4d7d]/[0.04]'">
+          <div class="pos" :class="(p.unrealized_pnl||0) >= 0 ? 'pos-up' : 'pos-down'">
             <div class="flex items-center gap-2">
               <span class="side" :class="p.side==='UP' ? 'side-up' : 'side-down'" x-text="p.side==='UP' ? '▲ UP' : '▼ DOWN'"></span>
-              <span class="text-[12.5px] font-semibold text-slate-200 truncate" x-text="shortSlug(p.slug)" :title="p.slug"></span>
-              <a class="ml-auto text-[#8390b0] hover:text-[#67e8f9] transition-colors" :href="'https://polymarket.com/event/'+p.slug" target="_blank" rel="noopener" title="Open on Polymarket" aria-label="Open on Polymarket">
+              <span class="pos-name truncate" x-text="shortSlug(p.slug)" :title="p.slug"></span>
+              <a class="ml-auto dim hover:text-white transition-colors" :href="'https://polymarket.com/event/'+p.slug" target="_blank" rel="noopener" title="Open on Polymarket" aria-label="Open on Polymarket">
                 <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M11 3h6v6M17 3l-8 8M8 5H4v11h11v-4" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
             </div>
             <div class="mt-3 flex items-end justify-between gap-3">
               <div>
-                <div class="text-[30px] font-extrabold tracking-tight tabular-nums leading-none" :class="pnlClass(p.unrealized_pnl)" x-text="p.unrealized_pnl==null ? '—' : sgnUsd(p.unrealized_pnl)"></div>
-                <div class="mt-1 text-xs text-[#9aa5c4]" x-text="p.unrealized_pct==null ? (p.quote_error || 'no quote') : sgnPct(p.unrealized_pct)+' unrealized'"></div>
+                <div class="pos-pnl" :class="pnlClass(p.unrealized_pnl)" x-text="p.unrealized_pnl==null ? '—' : sgnUsd(p.unrealized_pnl)"></div>
+                <div class="mt-1 text-xs muted" x-text="p.unrealized_pct==null ? (p.quote_error || 'no quote') : sgnPct(p.unrealized_pct)+' unrealized'"></div>
               </div>
               <div class="text-right">
-                <div class="text-[10.5px] uppercase tracking-wider text-[#8390b0]">window</div>
-                <div class="font-mono text-[15px] font-bold" :class="secsLeft(p)>0 ? 'text-white' : (p.mark_source==='resolved' ? (p.mark>=0.5 ? 'text-[#2ef2a4]' : 'text-[#ff7a9c]') : 'text-amber-300')" x-text="secsLeft(p)>0 ? clock(secsLeft(p))+' left' : (p.mark_source==='resolved' ? (p.mark>=0.5 ? 'resolved · won' : 'resolved · lost') : 'awaiting resolution')"></div>
-                <div class="text-[10.5px] text-[#8390b0]" x-show="secsLeft(p)<=0 && p.mark_source==='resolved'">bot settles it on its next loop</div>
+                <div class="eyebrow">window</div>
+                <div class="font-mono text-[15px] font-semibold mt-0.5" :class="secsLeft(p)>0 ? '' : (p.mark_source==='resolved' ? (p.mark>=0.5 ? 'up' : 'down') : 'warn')" x-text="secsLeft(p)>0 ? clock(secsLeft(p))+' left' : (p.mark_source==='resolved' ? (p.mark>=0.5 ? 'resolved · won' : 'resolved · lost') : 'awaiting resolution')"></div>
+                <div class="text-[10.5px] dim" x-show="secsLeft(p)<=0 && p.mark_source==='resolved'">bot settles it on its next loop</div>
               </div>
             </div>
             <!-- entry vs stop-loss vs take-profit vs now -->
-            <div class="mt-9 mb-5 mx-1" x-show="p.mark!=null" role="img" :aria-label="`Price ${cents(p.mark)}; entry ${cents(p.entry_price)}; stop-loss ${posTrack(p).hasSL ? cents(posTrack(p).sl) : 'off'}; take-profit ${cents(posTrack(p).tp)}`">
+            <div class="track-wrap" x-show="p.mark!=null" role="img" :aria-label="`Price ${cents(p.mark)}; entry ${cents(p.entry_price)}; stop-loss ${posTrack(p).hasSL ? cents(posTrack(p).sl) : 'off'}; take-profit ${cents(posTrack(p).tp)}`">
               <div class="track">
-                <div class="track-fill" :class="posTrack(p).up ? 'bg-[#2ef2a4]/70 shadow-[0_0_12px_#2ef2a4]' : 'bg-[#ff4d7d]/70 shadow-[0_0_12px_#ff4d7d]'" :style="`left:${posTrack(p).fillL}%;width:${posTrack(p).fillW}%`"></div>
-                <div class="track-tick bg-[#ff4d7d]" x-show="posTrack(p).hasSL" :style="{ left: posTrack(p).slX + '%' }"></div>
-                <div class="track-tick bg-white/80" :style="`left:${posTrack(p).eX}%`"></div>
-                <div class="track-tick bg-[#2ef2a4]" :style="`left:${posTrack(p).tpX}%`"></div>
+                <div class="track-fill" :class="posTrack(p).up ? 'fill-up' : 'fill-down'" :style="`left:${posTrack(p).fillL}%;width:${posTrack(p).fillW}%`"></div>
+                <div class="track-tick tick-sl" x-show="posTrack(p).hasSL" :style="{ left: posTrack(p).slX + '%' }"></div>
+                <div class="track-tick tick-entry" :style="`left:${posTrack(p).eX}%`"></div>
+                <div class="track-tick tick-tp" :style="`left:${posTrack(p).tpX}%`"></div>
                 <div class="track-mark" :class="posTrack(p).up ? 'up' : 'down'" :style="`left:${posTrack(p).mX}%`"></div>
-                <div class="track-bubble" :class="posTrack(p).up ? 'bg-[#2ef2a4] text-[#032016]' : 'bg-[#ff4d7d] text-white'" :style="`left:${posTrack(p).bX}%`" x-text="'now ' + cents(p.mark)"></div>
+                <div class="track-bubble" :class="posTrack(p).up ? 'bub-up' : 'bub-down'" :style="`left:${posTrack(p).bX}%`" x-text="'now ' + cents(p.mark)"></div>
               </div>
               <div class="track-legend">
-                <span x-show="posTrack(p).hasSL" class="text-[#ff8aa8]"><i class="bg-[#ff4d7d]"></i><span x-text="'SL ' + cents(posTrack(p).sl)"></span></span>
-                <span class="text-slate-200"><i class="bg-white/80"></i><span x-text="'entry ' + cents(p.entry_price)"></span></span>
-                <span class="text-[#2ef2a4] ml-auto"><i class="bg-[#2ef2a4]"></i><span x-text="posTrack(p).tp >= 0.99 ? 'settle $1' : 'TP ' + cents(posTrack(p).tp)"></span></span>
+                <span x-show="posTrack(p).hasSL" class="down"><i class="bg-sl"></i><span x-text="'SL ' + cents(posTrack(p).sl)"></span></span>
+                <span><i class="bg-entry"></i><span x-text="'entry ' + cents(p.entry_price)"></span></span>
+                <span class="up ml-auto"><i class="bg-tp"></i><span x-text="posTrack(p).tp >= 0.99 ? 'settle $1' : 'TP ' + cents(posTrack(p).tp)"></span></span>
               </div>
             </div>
-            <div class="grid grid-cols-4 gap-2 text-xs">
+            <div class="grid grid-cols-4 gap-2">
               <div class="stat"><div class="stat-l">Shares</div><div class="stat-v" x-text="num(p.shares,2)"></div></div>
               <div class="stat"><div class="stat-l">Entry</div><div class="stat-v" x-text="cents(p.entry_price)"></div></div>
               <div class="stat"><div class="stat-l">Mark</div><div class="stat-v" :title="p.mark_source" x-text="p.mark==null ? '—' : cents(p.mark)"></div></div>
               <div class="stat"><div class="stat-l">Cost</div><div class="stat-v" x-text="usd(p.cost_usd)"></div></div>
             </div>
             <div class="mt-3 flex items-center gap-3">
-              <div class="text-[11.5px] text-[#8390b0] min-w-0">Pays <b class="text-slate-200" x-text="usd(p.max_payout)"></b> if it wins.
-                <span class="block mt-0.5 text-[#ff8aa8]" x-show="closeState(p).state==='error'" x-text="closeState(p).msg"></span></div>
+              <div class="text-[11.5px] dim min-w-0">Pays <b class="text-slate-200" x-text="usd(p.max_payout)"></b> if it wins.
+                <span class="block mt-0.5 down" x-show="closeState(p).state==='error'" x-text="closeState(p).msg"></span></div>
               <button type="button" class="btn btn-close-pos ml-auto shrink-0" :class="'is-' + (closeState(p).state || 'idle')"
                       :disabled="closeDisabled(p)" :title="closeTitle(p)" @click="closePosition(p)" :aria-label="'Close position ' + p.slug">
                 <template x-if="closeState(p).state==='closing'"><span class="spinner" aria-hidden="true"></span></template>
@@ -365,69 +278,168 @@ tailwind.config = { theme: { extend: {
             </div>
           </div>
         </template>
-        <div x-show="!positions.length" class="empty py-12">
-          <div class="h-14 w-14 rounded-2xl grid place-items-center bg-[#8b5cf6]/10 border border-[#8b5cf6]/25 text-[#a78bfa]" aria-hidden="true">
-            <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M8 12h8" stroke-linecap="round"/></svg></div>
-          <div class="text-slate-200 font-semibold">Flat. No open positions.</div>
-          <div class="text-[12px] text-[#8390b0] max-w-[280px]">Next entry needs a 15m favorite at <span x-text="cents(cfgVal('FAV_MIN_PRICE'))"></span>–<span x-text="cents(cfgVal('FAV_MAX_PRICE'))"></span> with <span x-text="Math.round(cfgVal('FAV_MIN_SECS_LEFT')/60)"></span>–<span x-text="Math.round(cfgVal('FAV_MAX_SECS_LEFT')/60)"></span> min left.</div>
+        <div x-show="!positions.length" class="empty py-10">
+          <div class="empty-icon" aria-hidden="true"><svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M8 12h8" stroke-linecap="round"/></svg></div>
+          <div class="font-semibold text-slate-200">Flat. No open positions.</div>
+          <div class="text-[12px] dim max-w-[300px]">Next entry needs a 15m favorite at <span x-text="cents(cfgVal('FAV_MIN_PRICE'))"></span>–<span x-text="cents(cfgVal('FAV_MAX_PRICE'))"></span> with <span x-text="Math.round(cfgVal('FAV_MIN_SECS_LEFT')/60)"></span>–<span x-text="Math.round(cfgVal('FAV_MAX_SECS_LEFT')/60)"></span> min left.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Window + risk -->
+    <div class="card lg:col-span-5">
+      <div class="card-head">
+        <div><div class="card-title">Entry window</div><div class="card-sub">Current 15m market · <span class="mono" x-text="windowInfo().range"></span></div></div>
+        <span class="pill" :class="windowInfo().open ? 'pill-green' : 'pill-muted'"><span class="dot" :class="windowInfo().open && 'pulse'"></span><span x-text="windowInfo().open ? 'Open' : 'Waiting'"></span></span>
+      </div>
+      <div class="card-body">
+        <div class="flex items-center gap-5">
+          <div class="relative h-[104px] w-[104px] shrink-0" role="img" :aria-label="'Current 15 minute window ends in ' + clock(windowInfo().left)">
+            <svg class="cd-ring h-full w-full" viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="ring-bg" cx="60" cy="60" r="52" fill="none" stroke-width="8"/>
+              <circle class="ring-fg" cx="60" cy="60" r="52" fill="none" stroke-width="8" stroke-linecap="round"
+                :style="`color:${windowInfo().open ? 'var(--up)' : 'var(--accent)'}`" stroke="currentColor"
+                stroke-dasharray="326.73" :stroke-dashoffset="326.73 * (1 - windowInfo().pct)"/>
+            </svg>
+            <div class="absolute inset-0 grid place-items-center text-center">
+              <div><div class="font-mono text-[22px] font-semibold tabular-nums leading-none" x-text="clock(windowInfo().left)"></div>
+                <div class="mt-1 eyebrow !text-[9.5px]">left</div></div>
+            </div>
+          </div>
+          <div class="min-w-0 space-y-1.5 text-[13px]">
+            <div class="muted"><span x-text="windowInfo().open ? 'Entries close in ' : 'Next entry window in '"></span><b class="font-mono text-white" x-text="clock(windowInfo().nextIn)"></b></div>
+            <div class="dim text-[12px]">Band <b class="text-slate-200" x-text="cents(cfgVal('FAV_MIN_PRICE'))"></b>–<b class="text-slate-200" x-text="cents(cfgVal('FAV_MAX_PRICE'))"></b></div>
+            <div class="dim text-[12px]">Max <b class="text-slate-200" x-text="usd(cfgVal('MAX_POSITION_USD'))"></b> per trade</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="kv-list">
+          <div class="kv"><span class="k">Risk status</span>
+            <span class="v" :class="state.halted ? 'down' : 'up'" x-text="!state.available ? '—' : (state.halted ? 'Halted' : 'Active')"></span></div>
+          <div class="kv-note down" x-show="state.halted" x-text="state.halt_reason"></div>
+          <div class="kv"><span class="k">Loss streak</span><span class="v"><span x-text="state.consecutive_losses||0"></span></span></div>
+          <div class="kv"><span class="k">Drawdown limit</span><span class="v" x-text="pct(cfgVal('MAX_DRAWDOWN_PCT'))"></span></div>
+          <div class="kv"><span class="k">Trades today</span><span class="v"><span x-text="state.available ? (state.trades_today ?? 0) : '—'"></span><span class="dim"> / <span x-text="cfgVal('MAX_TRADES_PER_DAY')"></span></span></span></div>
+          <div class="bar mt-1" aria-hidden="true"><div class="bar-fill" :style="`width:${Math.min(100, 100*(state.trades_today||0)/Math.max(1,cfgVal('MAX_TRADES_PER_DAY')||1))}%`"></div></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Trades + decisions -->
-  <div class="grid grid-cols-1 xl:grid-cols-5 gap-5">
-    <div class="card xl:col-span-3 overflow-hidden">
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+    <!-- P&L chart -->
+    <div class="card lg:col-span-7">
       <div class="card-head">
-        <div><div class="card-title">Trade history</div><div class="card-sub"><span x-text="tradesTotal"></span> rows in trades.csv · newest first</div></div>
+        <div>
+          <div class="card-title">Cumulative realized P&amp;L</div>
+          <div class="card-sub"><span x-text="stats.closed||0"></span> closed trades · max drawdown <span x-text="sgnUsd(stats.max_drawdown||0)"></span></div>
+        </div>
+        <div class="tabs tabs-sm" role="group" aria-label="Chart mode">
+          <template x-for="m in ['auto','LIVE','PAPER','ALL']" :key="m">
+            <button class="tab" :class="statsMode===m && 'tab-on'" :aria-pressed="statsMode===m" @click="statsMode=m; refreshStats()" x-text="m==='auto' ? 'Current' : m.charAt(0)+m.slice(1).toLowerCase()"></button>
+          </template>
+        </div>
       </div>
-      <div class="overflow-auto max-h-[460px]" role="table" aria-label="Trade history">
-        <div class="trow trow-head" role="row"><div role="columnheader">Time</div><div role="columnheader">Action</div><div role="columnheader">Side</div><div role="columnheader">Market</div><div class="r" role="columnheader">Fill</div><div class="r" role="columnheader">USD</div><div class="r" role="columnheader">P&amp;L</div></div>
-        <template x-for="(t,i) in trades" :key="i">
-          <div class="trow" :class="tradeRowClass(t)" role="row" :title="t.reason + (t.note ? ' · '+t.note : '')">
-            <div class="c-time text-[#9aa5c4] tabular-nums" :title="t.time" role="cell"><span x-text="fmtTime(t.time)"></span><span x-show="t.mode==='PAPER'" class="block text-[10px] font-semibold uppercase tracking-wider text-amber-300/80">paper</span></div>
-            <div class="c-act" role="cell"><span class="act" :class="actClass(t)" x-text="t.action + (isFalse(t.ok) ? ' ✕' : '')"></span><span class="side side-inline hidden" :class="t.side==='UP' ? 'side-up' : 'side-down'" x-text="t.side==='UP' ? '▲ UP' : '▼ DOWN'"></span></div>
-            <div class="c-side" role="cell"><span class="side" :class="t.side==='UP' ? 'side-up' : 'side-down'" x-text="t.side==='UP' ? '▲ UP' : '▼ DOWN'"></span></div>
-            <div class="c-mkt min-w-0" role="cell"><div class="text-slate-200 font-medium truncate" x-text="shortSlug(t.slug)" :title="t.slug"></div><div class="text-[11px] text-[#8390b0] truncate" x-text="t.reason"></div></div>
-            <div class="c-fill r tabular-nums text-slate-300" role="cell"><span x-text="num(t.shares,2)"></span> <span class="text-[#8390b0]">@</span> <span x-text="cents(t.price)"></span></div>
-            <div class="c-usd r tabular-nums text-slate-300" role="cell" x-text="usd(t.usd)"></div>
-            <div class="c-pnl r tabular-nums font-bold" :class="pnlClass(t.pnl)" role="cell" x-text="t.pnl==='' || t.pnl==null ? '' : sgnUsd(t.pnl)"></div>
-          </div>
-        </template>
-        <div x-show="!trades.length" class="empty py-14"><div class="text-slate-200 font-semibold">No trades yet.</div><div class="text-[12px] text-[#8390b0]">Entries and exits show up here as soon as the bot writes them to trades.csv.</div></div>
+      <div class="px-4 sm:px-5 flex items-baseline gap-2.5">
+        <div class="text-[24px] font-semibold tracking-tight tabular-nums" :class="pnlClass(stats.realized_pnl)" x-text="stats.realized_pnl==null ? '—' : sgnUsd(stats.realized_pnl)"></div>
+        <div class="text-[12px] dim">realized in view</div>
+      </div>
+      <div class="relative h-[240px] sm:h-[280px] px-2 sm:px-3 pb-3 mt-1">
+        <canvas id="pnlChart" aria-label="Cumulative realized profit and loss chart" role="img"></canvas>
+        <div x-show="(stats.series||[]).length < 2" class="empty absolute inset-0">
+          <div>No closed trades yet. The curve appears after the first exit or resolution.</div>
+        </div>
       </div>
     </div>
 
-    <div class="card xl:col-span-2">
+    <!-- Performance -->
+    <div class="card lg:col-span-5">
+      <div class="card-head"><div><div class="card-title">Performance</div><div class="card-sub">Current mode · all closed trades</div></div></div>
+      <div class="card-body">
+        <div class="flex items-baseline justify-between">
+          <div class="text-[28px] font-semibold tracking-tight tabular-nums" x-text="stats.win_rate==null ? '—' : (stats.win_rate*100).toFixed(0)+'%'"></div>
+          <div class="text-[12.5px] muted"><span class="up font-semibold" x-text="stats.wins||0"></span> wins · <span class="down font-semibold" x-text="stats.losses||0"></span> losses</div>
+        </div>
+        <div class="bar bar-split mt-2" aria-hidden="true">
+          <div class="bg-up-solid" :style="`width:${(stats.closed ? 100*(stats.wins||0)/stats.closed : 0)}%`"></div>
+          <div class="bg-down-solid" :style="`width:${(stats.closed ? 100*(stats.losses||0)/stats.closed : 0)}%`"></div>
+        </div>
+        <div class="kv-list kv-grid-sm mt-4">
+          <div class="kv"><span class="k">Average win</span><span class="v up" x-text="stats.avg_win==null ? '—' : sgnUsd(stats.avg_win)"></span></div>
+          <div class="kv"><span class="k">Average loss</span><span class="v down" x-text="stats.avg_loss==null ? '—' : sgnUsd(stats.avg_loss)"></span></div>
+          <div class="kv"><span class="k">Best trade</span><span class="v" :class="pnlClass(stats.best)" x-text="stats.best==null ? '—' : sgnUsd(stats.best)"></span></div>
+          <div class="kv"><span class="k">Worst trade</span><span class="v" :class="pnlClass(stats.worst)" x-text="stats.worst==null ? '—' : sgnUsd(stats.worst)"></span></div>
+          <div class="kv"><span class="k">Entries</span><span class="v" x-text="stats.entries||0"></span></div>
+          <div class="kv"><span class="k">Volume</span><span class="v" x-text="usd(stats.volume||0)"></span></div>
+          <div class="kv"><span class="k">Fees paid</span><span class="v" x-text="usd(stats.fees||0)"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+    <!-- Trades -->
+    <div class="card lg:col-span-7 overflow-hidden">
       <div class="card-head">
-        <div><div class="card-title flex items-center gap-2">Decision feed <span class="dot pulse text-[#22d3ee] !h-1.5 !w-1.5" x-show="proc.running"></span></div>
-          <div class="card-sub">Every window the bot evaluated · repeats collapsed</div></div>
-        <label class="flex items-center gap-2 text-xs text-[#9aa5c4] cursor-pointer select-none">
-          <input type="checkbox" class="accent-violet-500" x-model="showNoise" @change="refreshDecisions()"> show timing skips
+        <div><div class="card-title">Trade history</div><div class="card-sub"><span x-text="tradesTotal"></span> rows · newest first</div></div>
+      </div>
+      <div class="scroll-y max-h-[440px]" role="table" aria-label="Trade history">
+        <div class="trow trow-head" role="row"><div role="columnheader">Time</div><div role="columnheader">Action</div><div role="columnheader">Market</div><div class="r" role="columnheader">Fill</div><div class="r" role="columnheader">USD</div><div class="r" role="columnheader">P&amp;L</div><div class="c-share" role="columnheader"><span class="sr-only">Share</span></div></div>
+        <template x-for="(t,i) in trades" :key="i">
+          <div class="trow" :class="tradeRowClass(t)" role="row" :title="t.reason + (t.note ? ' · '+t.note : '')">
+            <div class="c-time muted tabular-nums" :title="t.time" role="cell"><span x-text="fmtTime(t.time)"></span><span x-show="t.mode==='PAPER'" class="block text-[10px] font-semibold uppercase tracking-wider warn">paper</span></div>
+            <div class="c-act" role="cell"><span class="act" :class="actClass(t)" x-text="t.action + (isFalse(t.ok) ? ' ✕' : '')"></span></div>
+            <div class="c-mkt min-w-0" role="cell">
+              <div class="flex items-center gap-1.5 min-w-0"><span class="side side-xs shrink-0" :class="t.side==='UP' ? 'side-up' : 'side-down'" x-text="t.side==='UP' ? '▲ UP' : '▼ DOWN'"></span><span class="text-slate-200 font-medium truncate" x-text="shortSlug(t.slug)" :title="t.slug"></span></div>
+              <div class="text-[11px] dim truncate" x-text="t.reason"></div>
+            </div>
+            <div class="c-fill r tabular-nums muted" role="cell"><span x-text="num(t.shares,2)"></span> <span class="dim">@</span> <span x-text="cents(t.price)"></span></div>
+            <div class="c-usd r tabular-nums muted" role="cell" x-text="usd(t.usd)"></div>
+            <div class="c-pnl r tabular-nums font-semibold" :class="pnlClass(t.pnl)" role="cell" x-text="t.pnl==='' || t.pnl==null ? '' : sgnUsd(t.pnl)"></div>
+            <div class="c-share" role="cell">
+              <button type="button" class="share-btn" x-show="!isFalse(t.ok)" @click.stop="openShare(t)" title="Share trade" aria-label="Share trade">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="M7.5 7.5 12 3l4.5 4.5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>
+              </button>
+            </div>
+          </div>
+        </template>
+        <div x-show="!trades.length" class="empty py-12"><div class="font-semibold text-slate-200">No trades yet.</div><div class="text-[12px] dim">Entries and exits show up here as soon as the bot writes them to trades.csv.</div></div>
+      </div>
+    </div>
+
+    <!-- Decision feed -->
+    <div class="card lg:col-span-5 overflow-hidden">
+      <div class="card-head">
+        <div><div class="card-title flex items-center gap-2">Decision feed <span class="dot pulse accent-text !h-1.5 !w-1.5" x-show="proc.running"></span></div>
+          <div class="card-sub">Every window evaluated · repeats collapsed</div></div>
+        <label class="flex items-center gap-2 text-xs muted cursor-pointer select-none">
+          <input type="checkbox" class="check" x-model="showNoise" @change="refreshDecisions()"> timing skips
         </label>
       </div>
-      <div class="overflow-auto max-h-[460px] px-2 pb-3">
+      <div class="scroll-y max-h-[440px] px-2 pb-3">
         <template x-for="(d,i) in decisions" :key="i">
-          <div class="flex items-start gap-3 rounded-xl px-2.5 py-2 hover:bg-white/[0.035] transition-colors">
-            <span class="mt-1.5 h-2 w-2 shrink-0 rounded-full" :class="verdictDot(d.verdict)"></span>
+          <div class="dec">
+            <span class="dec-dot" :class="verdictDot(d.verdict)"></span>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <span class="text-[13px] font-semibold truncate" :class="d.verdict==='ENTER' ? 'text-[#2ef2a4]' : 'text-slate-100'" x-text="verdictLabel(d.verdict)"></span>
-                <span x-show="d._repeat>1" class="text-[10px] font-semibold rounded-md bg-white/[0.06] px-1.5 py-px text-[#9aa5c4]" x-text="'×'+d._repeat"></span>
-                <span class="ml-auto text-[11px] text-[#8390b0] whitespace-nowrap tabular-nums" x-text="fmtTime(d._last_time || d.time || d.ts)"></span>
+                <span class="dec-title truncate" :class="d.verdict==='ENTER' ? 'up' : ''" x-text="verdictLabel(d.verdict)"></span>
+                <span x-show="d._repeat>1" class="chip" x-text="'×'+d._repeat"></span>
+                <span class="ml-auto text-[11px] dim whitespace-nowrap tabular-nums" x-text="fmtTime(d._last_time || d.time || d.ts)"></span>
               </div>
-              <div class="mt-0.5 text-[11px] text-[#8390b0] font-mono truncate">
+              <div class="mt-0.5 text-[11px] dim font-mono truncate">
                 <span x-text="shortSlug(d.slug)"></span>
-                <template x-if="d.side"><span> · <span :class="d.side==='UP' ? 'text-[#2ef2a4]' : 'text-[#ff7a9c]'" x-text="d.side"></span></span></template>
+                <template x-if="d.side"><span> · <span :class="d.side==='UP' ? 'up' : 'down'" x-text="d.side"></span></span></template>
                 <template x-if="d.bid!=='' && d.bid!=null"><span> · <span x-text="cents(d.bid)"></span>/<span x-text="cents(d.ask)"></span></span></template>
                 <template x-if="d.edge!=='' && d.edge!=null"><span> · edge <span x-text="(+d.edge).toFixed(3)"></span></span></template>
                 <template x-if="d.secs_left!=='' && d.secs_left!=null"><span> · <span x-text="clock(+d.secs_left)"></span> left</span></template>
               </div>
-              <div x-show="d.note" class="text-[11px] text-[#8390b0] truncate" x-text="d.note"></div>
+              <div x-show="d.note" class="text-[11px] dim truncate" x-text="d.note"></div>
             </div>
           </div>
         </template>
-        <div x-show="!decisions.length" class="empty py-14"><div class="text-slate-200 font-semibold">No decisions logged yet.</div><div class="text-[12px] text-[#8390b0]">Start the bot to see each window it evaluates.</div></div>
+        <div x-show="!decisions.length" class="empty py-12"><div class="font-semibold text-slate-200">No decisions logged yet.</div><div class="text-[12px] dim">Start the bot to see each window it evaluates.</div></div>
       </div>
     </div>
   </div>
@@ -435,135 +447,157 @@ tailwind.config = { theme: { extend: {
   <!-- Log -->
   <div class="card">
     <div class="card-head">
-      <div><div class="card-title font-mono">bot.log</div><div class="card-sub">Last <span x-text="logLines.length"></span> lines · secrets redacted</div></div>
-      <div class="flex items-center gap-3 text-xs text-[#9aa5c4]">
-        <label class="flex items-center gap-2 cursor-pointer select-none"><input type="checkbox" class="accent-violet-500" x-model="logFollow"> follow</label>
-        <select x-model="logFilter" aria-label="Log filter" class="field !w-auto !py-1 !px-2.5 !text-xs">
+      <button type="button" class="text-left" @click="logOpen=!logOpen" :aria-expanded="logOpen">
+        <div class="card-title font-mono flex items-center gap-2"><svg class="h-3.5 w-3.5 dim transition-transform" :class="logOpen && 'rotate-90'" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M7 4l7 6-7 6z"/></svg>bot.log</div>
+        <div class="card-sub">Last <span x-text="logLines.length"></span> lines · secrets redacted</div>
+      </button>
+      <div class="flex items-center gap-3 text-xs muted" x-show="logOpen">
+        <label class="flex items-center gap-2 cursor-pointer select-none"><input type="checkbox" class="check" x-model="logFollow"> follow</label>
+        <select x-model="logFilter" aria-label="Log filter" class="field field-sm !w-auto">
           <option value="">all levels</option><option value="WARNING|ERROR">warnings+</option><option value="ENTER|CLOSED|HALT">trades &amp; halts</option>
         </select>
       </div>
     </div>
-    <div class="terminal mx-4 mb-4 overflow-hidden">
-      <div class="terminal-bar" aria-hidden="true"><span class="bg-[#ff4d7d]/80"></span><span class="bg-amber-300/80"></span><span class="bg-[#2ef2a4]/80"></span></div>
-      <div id="logbox" class="h-[260px] overflow-auto p-3 font-mono text-[11.5px] leading-relaxed">
+    <div class="terminal mx-3 sm:mx-4 mb-3 sm:mb-4" x-show="logOpen">
+      <div id="logbox" class="h-[240px] overflow-auto p-3 font-mono text-[11.5px] leading-relaxed">
         <template x-for="(l,i) in filteredLog()" :key="i"><div class="whitespace-pre-wrap break-all" :class="logClass(l)" x-text="l"></div></template>
-        <div x-show="!logLines.length" class="text-[#8390b0]">bot.log is empty or missing.</div>
+        <div x-show="!logLines.length" class="dim">bot.log is empty or missing.</div>
       </div>
     </div>
   </div>
 </section>
 
 <!-- ============================== SETTINGS ============================== -->
-<section x-show="tab==='settings' && !showSetup()" class="space-y-5" style="display:none">
-  <div class="card glow-border p-5 sm:p-6 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+<section x-show="tab==='settings' && !showSetup()" class="space-y-4 sm:space-y-5 pb-20" style="display:none">
+
+  <div class="flex items-end justify-between gap-3 px-0.5">
     <div>
-      <div class="eyebrow">Configuration</div>
-      <h2 class="mt-1 text-[26px] font-extrabold tracking-tight"><span class="grad-text">Strategy &amp; risk settings</span></h2>
-      <p class="text-[13px] text-[#9aa5c4] mt-1">Writes only these keys to <span class="font-mono text-slate-200" x-text="cfg.env_file || '.env'"></span>. Secrets are never shown. Manage your wallet in the Wallet card below.</p>
+      <h2 class="page-title">Settings</h2>
+      <p class="text-[12.5px] muted mt-1">Saved to <span class="mono text-slate-200" x-text="cfg.env_file || '.env'"></span>. Secrets are never shown.</p>
     </div>
-    <div class="flex flex-wrap items-center gap-2.5">
-      <span class="text-xs text-[#9aa5c4]" x-show="dirtyCount()"><span class="text-amber-300 font-bold" x-text="dirtyCount()"></span> unsaved change(s)</span>
-      <button class="btn btn-ghost" :disabled="!dirtyCount()" @click="resetForm()">Discard</button>
-      <button class="btn btn-ghost" :disabled="!dirtyCount() || busy" @click="saveConfig(false)">Save</button>
-      <button class="btn btn-primary" :disabled="!dirtyCount() || busy" @click="saveConfig(true)">Save &amp; restart</button>
+    <span class="chip chip-warn" x-show="dirtyCount()" x-text="dirtyCount() + ' unsaved'"></span>
+  </div>
+
+  <!-- Trading mode -->
+  <div class="card" :class="!isPaperForm() && 'card-live'">
+    <div class="card-head">
+      <div><div class="card-title">Trading mode</div><div class="card-sub">Paper uses simulated fills; live spends real pUSD</div></div>
+      <div class="seg" role="group" aria-label="Trading mode">
+        <button id="modePaper" :class="isPaperForm() && 'on-paper'" :aria-pressed="isPaperForm()" @click="form.DRY_RUN=true">Paper</button>
+        <button id="modeLive" :class="!isPaperForm() && 'on-live'" :aria-pressed="!isPaperForm()" @click="form.DRY_RUN=false">Live</button>
+      </div>
+    </div>
+    <div class="px-4 sm:px-5 pb-4 text-[12.5px] muted leading-relaxed">
+      <p x-show="!isPaperForm()">Switching to live asks you to type <span class="mono down">GO LIVE</span> and confirm it uses real money. Live trading is currently <b x-text="cfg.live_armed ? 'armed' : 'not armed'" :class="cfg.live_armed ? 'up' : 'warn'"></b>.</p>
+      <p x-show="isPaperForm()">Paper trades are simulated against the live order book. No orders are sent.</p>
     </div>
   </div>
 
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5 items-start">
     <template x-for="g in ['Strategy','Risk','Exits']" :key="g">
       <div class="card">
-        <div class="card-head"><div class="flex items-center gap-3">
-          <span class="icon-chip" aria-hidden="true">
-            <svg x-show="g==='Strategy'" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 15l4-5 3 3 7-8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <svg x-show="g==='Risk'" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 2.5 3.5 5v4.5c0 4 2.8 7 6.5 8 3.7-1 6.5-4 6.5-8V5L10 2.5Z" stroke-linejoin="round"/></svg>
-            <svg x-show="g==='Exits'" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 4H4v12h4M12 6l4 4-4 4M16 10H8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          <div class="card-title" x-text="g"></div></div></div>
-        <div class="px-5 pb-5 space-y-4">
+        <div class="card-head">
+          <div class="flex items-center gap-3">
+            <span class="icon-chip" aria-hidden="true">
+              <svg x-show="g==='Strategy'" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 15l4-5 3 3 7-8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <svg x-show="g==='Risk'" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 2.5 3.5 5v4.5c0 4 2.8 7 6.5 8 3.7-1 6.5-4 6.5-8V5L10 2.5Z" stroke-linejoin="round"/></svg>
+              <svg x-show="g==='Exits'" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 4H4v12h4M12 6l4 4-4 4M16 10H8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <div class="card-title" x-text="g"></div>
+          </div>
+        </div>
+        <div class="settings-list">
           <template x-for="k in keysIn(g)" :key="k">
-            <div>
-              <div class="flex items-center justify-between gap-2">
-                <label class="text-[13px] font-semibold text-slate-100" :for="'f_'+k" x-text="cfg.editable[k].label"></label>
-                <span class="font-mono text-[10px] text-[#8390b0]" x-text="k"></span>
+            <div class="setting" :class="isDirty(k) && 'setting-dirty'">
+              <div class="setting-text">
+                <label class="setting-label" :for="'f_'+k" x-text="cfg.editable[k].label"></label>
+                <div class="setting-help" x-text="cfg.editable[k].help + ` Range ${cfg.editable[k].min}–${cfg.editable[k].max}.`"></div>
+                <div class="setting-key" x-text="k"></div>
               </div>
-              <div class="mt-1.5 flex items-center gap-2">
-                <input :id="'f_'+k" type="number" class="field" :class="isDirty(k) && 'field-dirty'" :min="cfg.editable[k].min" :max="cfg.editable[k].max" :step="cfg.editable[k].step" x-model="form[k]">
-                <span class="text-xs font-bold text-[#a78bfa] w-20 text-right" x-text="hint(k)"></span>
+              <div class="setting-input">
+                <input :id="'f_'+k" type="number" inputmode="decimal" class="field field-num" :class="isDirty(k) && 'field-dirty'" :min="cfg.editable[k].min" :max="cfg.editable[k].max" :step="cfg.editable[k].step" x-model="form[k]">
+                <span class="unit" x-text="hint(k)"></span>
               </div>
-              <div class="mt-1 text-[11.5px] text-[#8390b0] leading-snug" x-text="cfg.editable[k].help + ` Range ${cfg.editable[k].min}–${cfg.editable[k].max}.`"></div>
             </div>
           </template>
         </div>
       </div>
     </template>
-  </div>
 
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-    <div class="card" :class="form.DRY_RUN===false || form.DRY_RUN==='false' ? '!border-[#ff4d7d]/40 shadow-[0_0_50px_-20px_rgba(255,77,125,.7)]' : ''">
-      <div class="card-head"><div><div class="card-title">Trading mode</div><div class="card-sub">Paper uses simulated fills; live spends real pUSD</div></div></div>
-      <div class="px-5 pb-5">
-        <div class="seg" role="group" aria-label="Trading mode">
-          <button id="modePaper" :class="isPaperForm() && 'on-paper'" :aria-pressed="isPaperForm()" @click="form.DRY_RUN=true">Paper</button>
-          <button id="modeLive" :class="!isPaperForm() && 'on-live'" :aria-pressed="!isPaperForm()" @click="form.DRY_RUN=false">Live</button>
-        </div>
-        <p class="mt-3 text-[12.5px] text-[#9aa5c4] leading-relaxed" x-show="!isPaperForm()">Switching to live asks you to type <span class="font-mono text-[#ff8aa8]">GO LIVE</span> and confirm it uses real money. Live trading is currently <b x-text="cfg.live_armed ? 'armed' : 'not armed'" :class="cfg.live_armed ? 'text-[#2ef2a4]' : 'text-amber-300'"></b>.</p>
-        <p class="mt-3 text-[12.5px] text-[#9aa5c4] leading-relaxed" x-show="isPaperForm()">Paper trades are simulated against the live order book. No orders are sent.</p>
-      </div>
-    </div>
+    <!-- Wallet -->
     <div class="card">
-      <div class="card-head"><div class="flex items-center gap-3">
+      <div class="card-head">
+        <div class="flex items-center gap-3">
           <span class="icon-chip" aria-hidden="true"><svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2.5" y="5" width="15" height="11" rx="2"/><path d="M13 10.5h2M2.5 8h15"/></svg></span>
-          <div><div class="card-title">Wallet</div><div class="card-sub">The key is never shown after saving</div></div></div>
-        <span class="pill" :class="(cfg.wallet||{}).key_set ? 'pill-green' : 'pill-muted'"><span class="dot"></span><span x-text="(cfg.wallet||{}).key_set ? 'key set: yes' : 'key set: no'"></span></span></div>
-      <div class="px-5 pb-5 space-y-3">
-        <div class="flex items-center justify-between rounded-xl bg-white/[0.035] border border-white/[0.05] px-3.5 py-3"><span class="text-xs text-[#8390b0]">Address</span><span class="font-mono text-[13px] text-slate-100" x-text="(cfg.wallet||{}).address_masked || 'not set'"></span></div>
-        <div class="flex items-center justify-between rounded-xl bg-white/[0.035] border border-white/[0.05] px-3.5 py-3"><span class="text-xs text-[#8390b0]">Private key</span><span class="font-mono text-[13px] text-slate-300" x-text="(cfg.wallet||{}).key_set ? '••••••••••••' : 'not set'"></span></div>
+          <div><div class="card-title">Wallet</div><div class="card-sub">The key is never shown after saving</div></div>
+        </div>
+        <span class="pill" :class="(cfg.wallet||{}).key_set ? 'pill-green' : 'pill-muted'"><span class="dot"></span><span x-text="(cfg.wallet||{}).key_set ? 'key set' : 'no key'"></span></span>
+      </div>
+      <div class="card-body space-y-2.5">
+        <div class="kv-box"><span class="k">Address</span><span class="mono" x-text="(cfg.wallet||{}).address_masked || 'not set'"></span></div>
+        <div class="kv-box"><span class="k">Private key</span><span class="mono muted" x-text="(cfg.wallet||{}).key_set ? '••••••••••••' : 'not set'"></span></div>
         <div x-show="wallet.replacing" x-transition class="space-y-2" style="display:none">
           <div class="relative"><input :type="wallet.show ? 'text' : 'password'" autocomplete="off" spellcheck="false" aria-label="New private key" class="field font-mono pr-16 text-[13px]" placeholder="New private key (0x + 64 hex)" x-model="wallet.key">
-            <button type="button" class="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-slate-300 hover:text-white px-2 py-0.5 rounded-md bg-white/[0.06]" @click="wallet.show=!wallet.show" x-text="wallet.show ? 'Hide' : 'Show'"></button></div>
+            <button type="button" class="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-semibold muted hover:text-white px-2 py-0.5 rounded-md bg-white/[0.06]" @click="wallet.show=!wallet.show" x-text="wallet.show ? 'Hide' : 'Show'"></button></div>
           <input autocomplete="off" spellcheck="false" aria-label="Wallet address" class="field font-mono text-[13px]" placeholder="Wallet address (optional: keep current)" x-model="wallet.addr">
           <div class="flex gap-2"><button class="btn btn-primary" :disabled="busy || !isKey(wallet.key) || (wallet.addr && !isAddr(wallet.addr))" @click="replaceKey()">Save key</button><button class="btn btn-ghost" @click="wallet={replacing:false,key:'',addr:'',show:false}">Cancel</button></div>
         </div>
-        <div x-show="!wallet.replacing" class="flex gap-2">
+        <div x-show="!wallet.replacing" class="flex gap-2 pt-1">
           <button class="btn btn-ghost" @click="wallet.replacing=true" x-text="(cfg.wallet||{}).key_set ? 'Replace key' : 'Add key'"></button>
           <button class="btn btn-ghost btn-danger-text" :disabled="!(cfg.wallet||{}).key_set || busy" @click="removeKey()">Remove key</button>
         </div>
       </div>
     </div>
-    <div class="card">
-      <div class="card-head"><div><div class="card-title">Other settings (read-only)</div><div class="card-sub">Change these in .env by hand</div></div></div>
-      <div class="px-5 pb-5 grid grid-cols-1 gap-y-0.5 max-h-[300px] overflow-auto">
-        <template x-for="(v,k) in cfg.display" :key="k">
-          <div class="flex items-center justify-between gap-3 border-b border-white/[0.05] py-1.5"><span class="font-mono text-[11px] text-[#8390b0]" x-text="k"></span><span class="font-mono text-[12px] text-slate-200" x-text="String(v)"></span></div>
-        </template>
-      </div>
-    </div>
   </div>
+
+  <!-- Read-only -->
+  <details class="card details-card">
+    <summary class="card-head cursor-pointer">
+      <div><div class="card-title">Other settings (read-only)</div><div class="card-sub">Change these in .env by hand</div></div>
+    </summary>
+    <div class="card-body grid grid-cols-1 sm:grid-cols-2 gap-x-8">
+      <template x-for="(v,k) in cfg.display" :key="k">
+        <div class="kv"><span class="font-mono text-[11px] dim" x-text="k"></span><span class="font-mono text-[12px]" x-text="String(v)"></span></div>
+      </template>
+    </div>
+  </details>
 </section>
 </main>
 
-<footer class="mx-auto max-w-[1440px] px-4 sm:px-6 pb-8 text-[11.5px] text-[#8390b0] flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-  <span>Local dashboard · times in <span x-text="tzLabel"></span> · refreshes every 4 s</span>
+<!-- Sticky save bar (settings, only when something changed) -->
+<div class="savebar" x-show="tab==='settings' && !showSetup() && dirtyCount()" x-transition style="display:none">
+  <div class="wrap flex items-center gap-2">
+    <span class="text-[12.5px] muted hidden sm:inline"><b class="warn" x-text="dirtyCount()"></b> unsaved change(s)</span>
+    <div class="flex items-center gap-2 ml-auto w-full sm:w-auto">
+      <button class="btn btn-ghost" :disabled="!dirtyCount()" @click="resetForm()">Discard</button>
+      <button class="btn btn-ghost" :disabled="!dirtyCount() || busy" @click="saveConfig(false)">Save</button>
+      <button class="btn btn-primary flex-1 sm:flex-none" :disabled="!dirtyCount() || busy" @click="saveConfig(true)">Save &amp; restart</button>
+    </div>
+  </div>
+</div>
+
+<footer class="wrap pb-8 pt-2 text-[11.5px] dim flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
+  <span>Times in <span x-text="tzLabel"></span> · refreshes every 4 s</span>
   <span class="sm:ml-auto">Trading is risky. Past results don't guarantee future returns.</span>
 </footer>
 
 <!-- Modal -->
-<div x-show="modal.open" class="fixed inset-0 z-50 grid place-items-center bg-[#02030a]/70 backdrop-blur-md p-4" style="display:none" x-transition.opacity @keydown.escape.window="modal.open=false">
-  <div class="modal-card w-full max-w-[480px] rounded-3xl p-6" :class="modal.danger && 'danger'" role="dialog" aria-modal="true" aria-labelledby="modalTitle" @click.outside="modal.open=false"
-       x-show="modal.open" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 scale-95 translate-y-2" x-transition:enter-end="opacity-100 scale-100 translate-y-0">
+<div x-show="modal.open" class="fixed inset-0 z-50 grid place-items-center modal-backdrop p-4" style="display:none" x-transition.opacity @keydown.escape.window="modal.open=false">
+  <div class="modal-card w-full max-w-[480px] rounded-2xl p-5 sm:p-6" :class="modal.danger && 'danger'" role="dialog" aria-modal="true" aria-labelledby="modalTitle" @click.outside="modal.open=false"
+       x-show="modal.open" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0 scale-95 translate-y-2" x-transition:enter-end="opacity-100 scale-100 translate-y-0">
     <div class="flex items-start gap-3.5">
-      <div class="h-11 w-11 shrink-0 rounded-2xl grid place-items-center text-lg font-black" :class="modal.danger ? 'bg-[#ff4d7d]/15 text-[#ff7a9c] border border-[#ff4d7d]/30 shadow-[0_0_24px_-6px_rgba(255,77,125,.8)]' : 'bg-[#8b5cf6]/15 text-[#c4b5fd] border border-[#8b5cf6]/30 shadow-[0_0_24px_-6px_rgba(139,92,246,.8)]'" aria-hidden="true">!</div>
+      <div class="h-10 w-10 shrink-0 rounded-xl grid place-items-center text-lg font-bold" :class="modal.danger ? 'modal-icon-danger' : 'modal-icon'" aria-hidden="true">!</div>
       <div>
-        <h3 id="modalTitle" class="text-[17px] font-bold text-white" x-text="modal.title"></h3>
-        <p class="mt-1.5 text-[13.5px] text-[#a9b4cc] leading-relaxed" x-html="modal.body"></p>
+        <h3 id="modalTitle" class="text-[17px] font-semibold text-white" x-text="modal.title"></h3>
+        <p class="mt-1.5 text-[13.5px] muted leading-relaxed" x-html="modal.body"></p>
       </div>
     </div>
     <template x-if="modal.phrase">
-      <div class="mt-5"><label class="text-xs text-[#9aa5c4]" for="phraseInput">Type <span class="font-mono font-bold text-white" x-text="modal.phrase"></span> to confirm</label>
+      <div class="mt-5"><label class="text-xs muted" for="phraseInput">Type <span class="font-mono font-bold text-white" x-text="modal.phrase"></span> to confirm</label>
         <input id="phraseInput" class="field mt-1.5 font-mono" x-model="modal.input" @keydown.enter="modalOk()" x-ref="phraseInput"></div>
     </template>
     <template x-if="modal.ack">
-      <label class="mt-3 flex items-start gap-2.5 text-[13px] text-slate-200 cursor-pointer select-none"><input type="checkbox" class="mt-0.5 accent-rose-500" x-model="modal.acked"><span x-text="modal.ack"></span></label>
+      <label class="mt-3 flex items-start gap-2.5 text-[13px] text-slate-200 cursor-pointer select-none"><input type="checkbox" class="check mt-0.5" x-model="modal.acked"><span x-text="modal.ack"></span></label>
     </template>
     <div class="mt-6 flex flex-col-reverse sm:flex-row justify-end gap-2">
       <button class="btn btn-ghost" @click="modal.open=false">Cancel</button>
@@ -572,11 +606,33 @@ tailwind.config = { theme: { extend: {
   </div>
 </div>
 
+<!-- Share trade card -->
+<div x-show="share.open" class="fixed inset-0 z-50 grid place-items-center modal-backdrop p-3 sm:p-4" style="display:none" x-transition.opacity
+     @keydown.escape.window="closeShare()" @click.self="closeShare()">
+  <div class="modal-card share-card w-full max-w-[460px] rounded-2xl p-4 sm:p-5" role="dialog" aria-modal="true" aria-labelledby="shareTitle" x-show="share.open"
+       x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0 scale-95 translate-y-2" x-transition:enter-end="opacity-100 scale-100 translate-y-0">
+    <div class="flex items-center justify-between gap-3 mb-3">
+      <h3 id="shareTitle" class="text-[16px] font-semibold text-white">Share trade</h3>
+      <button type="button" class="btn btn-ghost btn-sq" @click="closeShare()" aria-label="Close">✕</button>
+    </div>
+    <div class="share-preview">
+      <img x-show="share.url" :src="share.url" alt="Trade card preview" draggable="false" />
+      <div x-show="!share.url" class="share-loading">Rendering…</div>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <button type="button" class="btn btn-primary flex-1" :disabled="!share.blob" @click="downloadShare()">Download</button>
+      <button type="button" class="btn btn-ghost flex-1" x-show="share.canShare" :disabled="!share.blob" @click="nativeShare()">Share</button>
+      <button type="button" class="btn btn-ghost flex-1" x-show="share.canCopy" :disabled="!share.blob" @click="copyShare()">Copy</button>
+    </div>
+    <p class="mt-2.5 text-[11.5px] dim" x-show="!share.canShare">Tip: on a phone, press and hold the image to save or share it. Share/Copy buttons need a secure (https) connection.</p>
+  </div>
+</div>
+
 <!-- Toasts -->
 <div class="fixed bottom-4 right-4 left-4 sm:left-auto z-50 space-y-2 sm:w-[380px]" aria-live="polite">
   <template x-for="t in toasts" :key="t.id">
-    <div class="toast rounded-2xl border px-4 py-3 text-sm flex items-start gap-2.5" x-transition :class="t.kind==='err' ? 'border-[#ff4d7d]/35 bg-[#2a0815]/85 text-rose-100' : 'border-[#2ef2a4]/30 bg-[#04241a]/85 text-emerald-50'">
-      <span class="dot mt-1.5 shrink-0" :class="t.kind==='err' ? 'text-[#ff4d7d]' : 'text-[#2ef2a4]'"></span><span x-text="t.msg"></span></div>
+    <div class="toast" x-transition :class="t.kind==='err' ? 'toast-err' : 'toast-ok'">
+      <span class="dot mt-1.5 shrink-0" :class="t.kind==='err' ? 'down' : 'up'"></span><span x-text="t.msg"></span></div>
   </template>
 </div>
 </body>

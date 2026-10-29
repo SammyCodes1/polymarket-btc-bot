@@ -182,6 +182,10 @@ class Config:
     spot_exit_cross_usd: float = _env("SPOT_EXIT_CROSS_USD", 50.0)
     spot_exit_secs_left: int = _env("SPOT_EXIT_SECS_LEFT", 600)
     spot_exit_max_age: float = _env("SPOT_EXIT_MAX_AGE", 20.0)     # ignore spot snapshots older than this (s)
+    # Cushion (lead) filter (favorite strategy): only enter when BTC spot is already at least FAV_MIN_LEAD_USD
+    # beyond the price to beat in the bet's direction (UP: spot-ptb >= X; DOWN: ptb-spot >= X). Fails closed
+    # (skips) when the strike or a fresh spot (<= SPOT_EXIT_MAX_AGE s old) is unavailable. 0 = off.
+    fav_min_lead_usd: float = _env("FAV_MIN_LEAD_USD", 0.0)
     slippage: float = _env("SLIPPAGE", 0.02)
 
     # --- risk controls ---
@@ -195,9 +199,18 @@ class Config:
     fav_min_size_buffer: float = _env("FAV_MIN_SIZE_BUFFER", 0.03)
     kelly_fraction: float = _env("KELLY_FRACTION", 0.25)
     max_total_btc_exposure_pct: float = _env("MAX_TOTAL_BTC_EXPOSURE_PCT", 0.05)
+    # Total-open-exposure cap: skip a new entry when open position cost + resting order cost + the new stake
+    # would exceed this fraction of the bankroll. 0 = disabled. (If the 5-share minimum order alone exceeds it, the entry is skipped.)
+    max_total_exposure_pct: float = _env("MAX_TOTAL_EXPOSURE_PCT", 0.0)
+    # Stale-feed kill switch: if the BTC price feed (or the market scan) has produced no fresh data for this many
+    # seconds, skip new entries (fail closed) until it is fresh again. Exits/management are NOT affected. 0 = disabled.
+    stale_feed_kill_seconds: float = _env("STALE_FEED_KILL_SECONDS", 0.0)
     max_net_direction_pct: float = _env("MAX_NET_DIRECTION_PCT", 0.04)
     max_open_positions: int = _env("MAX_OPEN_POSITIONS", 2)
     daily_loss_limit_pct: float = _env("DAILY_LOSS_LIMIT_PCT", 0.05)
+    # Weekly loss stop: halt new entries (like the daily limit) once realized P&L since Monday 00:00 UTC (ISO week)
+    # is <= -this fraction of the bankroll at the start of the week. Clears itself at the next ISO week. 0 = disabled.
+    weekly_loss_limit_pct: float = _env("WEEKLY_LOSS_LIMIT_PCT", 0.0)
     max_drawdown_pct: float = _env("MAX_DRAWDOWN_PCT", 0.10)
     max_consecutive_losses: int = _env("MAX_CONSECUTIVE_LOSSES", 4)
     max_trades_per_day: int = _env("MAX_TRADES_PER_DAY", 20)
@@ -1053,6 +1066,53 @@ def _common_gates(market: BtcMarket, snap: Optional[PriceSnapshot], news: NewsSt
 
 
 _GATE_LAST: dict = {}
+_EXPO_LOG: dict = {}
+_STALE_STATE: dict = {"active": False}
+
+
+def exposure_cap_verdict(cfg: "Config", *, bank: float, open_cost: float, pending_cost: float,
+                         new_usd: float) -> tuple[bool, str]:
+    """Pure total-exposure cap. Returns (ok, detail). Always ok when MAX_TOTAL_EXPOSURE_PCT<=0."""
+    pct = float(getattr(cfg, "max_total_exposure_pct", 0.0) or 0.0)
+    if pct <= 0:
+        return True, "off"
+    cap = pct * max(0.0, bank)
+    total = open_cost + pending_cost + new_usd
+    if total > cap + 1e-9:
+        return False, (f"open ${open_cost:.2f} + pending ${pending_cost:.2f} + new ${new_usd:.2f} = ${total:.2f} "
+                       f"> cap ${cap:.2f} ({pct:g} x bankroll ${bank:.2f})")
+    return True, f"${total:.2f} <= cap ${cap:.2f}"
+
+
+def stale_feed_verdict(cfg: "Config", *, spot_age: float, scan_age: float) -> tuple[bool, str]:
+    """Pure stale-feed check. Returns (stale, detail). Never stale when STALE_FEED_KILL_SECONDS<=0.
+    The market scan only refreshes every SCAN_SECONDS, so its limit is never below 2x that."""
+    lim = float(getattr(cfg, "stale_feed_kill_seconds", 0.0) or 0.0)
+    if lim <= 0:
+        return False, "off"
+    scan_lim = max(lim, 2.0 * float(cfg.scan_seconds))
+    if spot_age > lim:
+        return True, f"BTC price feed last fresh {spot_age:.0f}s ago (> {lim:g}s)"
+    if scan_age > scan_lim:
+        return True, f"market scan last fresh {scan_age:.0f}s ago (> {scan_lim:g}s)"
+    return False, "fresh"
+_LEAD_LOG: dict = {}
+
+
+def lead_filter_verdict(cfg: "Config", *, side: str, spot: Optional[float], ptb: Optional[float],
+                        snap_age: float = 0.0) -> tuple[bool, str]:
+    """Pure cushion filter. Returns (ok, detail). Always ok when FAV_MIN_LEAD_USD<=0. Fails closed on missing/stale data."""
+    need = float(getattr(cfg, "fav_min_lead_usd", 0.0) or 0.0)
+    if need <= 0:
+        return True, "off"
+    if not ptb or ptb <= 0:
+        return False, "no strike (price to beat) available"
+    if not spot or spot <= 0 or snap_age > cfg.spot_exit_max_age:
+        return False, f"no fresh BTC spot (age {snap_age:.0f}s)"
+    lead = (spot - ptb) if side == "UP" else (ptb - spot)
+    if lead < need:
+        return False, f"{side} lead ${lead:.0f} < ${need:g} (spot={spot:.0f} strike={ptb:.0f})"
+    return True, f"{side} lead ${lead:.0f} >= ${need:g}"
 
 
 def decide_favorite(market: BtcMarket, snap: Optional[PriceSnapshot], news: NewsState) -> tuple[Optional[Signal], str, dict]:
@@ -1072,6 +1132,16 @@ def decide_favorite(market: BtcMarket, snap: Optional[PriceSnapshot], news: News
     d.update(side=side, bid=bid, ask=ask, p_up=round(p_side if side == "UP" else 1 - p_side, 4))
     if verdict != "ENTER":
         return None, verdict, d
+    if CFG.fav_min_lead_usd > 0:
+        ptb, _ptb_src = price_to_beat(market, snap)
+        spot = snap.spot * _BASIS.get(market.slug, 1.0)      # same Chainlink-basis spot the spot exit uses
+        lok, ldetail = lead_filter_verdict(CFG, side=side, spot=spot, ptb=ptb, snap_age=now_ts() - snap.fetched_at)
+        d["lead"] = ldetail
+        if not lok:
+            if _LEAD_LOG.get(market.slug) != ldetail.split(" (")[0]:   # log once per market per reason, not every loop
+                _LEAD_LOG[market.slug] = ldetail.split(" (")[0]
+                log.info("cushion filter skip %s: %s", market.slug, ldetail)
+            return None, "skip:lead_filter", d
     if CFG.use_news:
         lean = news.sentiment if side == "UP" else -news.sentiment
         if lean < -CFG.news_veto:
@@ -1484,6 +1554,11 @@ class State:
     manual_closed_slugs: list = field(default_factory=list)
     # slug -> PendingOrder: resting limit entries (ENTRY_MODE=limit)
     pending_orders: dict = field(default_factory=dict)
+    # weekly loss stop (ISO week, UTC). Empty week = not initialised yet; Risk.roll_week() anchors it to the
+    # current bankroll on the first loop so it never trips on old history.
+    week: str = ""
+    week_start_bankroll_usd: float = 0.0
+    realized_pnl_week: float = 0.0
 
     def save(self) -> None:
         tmp = STATE_FILE.with_suffix(".tmp")
@@ -1615,9 +1690,35 @@ def size_usd(cfg: "Config", *, bank: float, p_side: float, price: float, total_e
     return round(usd, 2), "ok"
 
 
+def iso_week_key(dt: Optional[datetime] = None) -> str:
+    y, w, _ = (dt or datetime.now(timezone.utc)).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def weekly_loss_verdict(cfg: "Config", *, pnl_week: float, week_start: float) -> Optional[str]:
+    """Pure weekly loss check. Returns a halt reason or None. Never trips when WEEKLY_LOSS_LIMIT_PCT<=0
+    or the week-start bankroll is unknown."""
+    lim = float(getattr(cfg, "weekly_loss_limit_pct", 0.0) or 0.0)
+    if lim <= 0 or week_start <= 0:
+        return None
+    if pnl_week <= -lim * week_start:
+        return f"weekly loss limit hit ({pnl_week:.2f} of start {week_start:.2f}, limit {lim:g})"
+    return None
+
+
 class Risk:
     def __init__(self, state: State) -> None:
         self.s = state
+
+    def roll_week(self, now: Optional[datetime] = None) -> None:
+        wk = iso_week_key(now)
+        if self.s.week != wk or self.s.week_start_bankroll_usd <= 0:
+            log.info("new UTC ISO week %s: weekly loss counter reset (week start bankroll %.2f)", wk,
+                     self.s.bankroll_usd)
+            self.s.week, self.s.week_start_bankroll_usd = wk, self.s.bankroll_usd
+            self.s.realized_pnl_week = 0.0
+            if self.s.halted and self.s.halt_reason.startswith("weekly"):
+                self.s.halted, self.s.halt_reason = False, ""
 
     def roll_day(self) -> None:
         today = datetime.now(timezone.utc).date().isoformat()
@@ -1636,6 +1737,9 @@ class Risk:
             return "kill switch file present"
         if self.s.realized_pnl_day <= -CFG.daily_loss_limit_pct * self.s.day_start_bankroll_usd:
             return f"daily loss limit hit ({self.s.realized_pnl_day:.2f})"
+        wk_halt = weekly_loss_verdict(CFG, pnl_week=self.s.realized_pnl_week, week_start=self.s.week_start_bankroll_usd)
+        if wk_halt:
+            return wk_halt
         breach = self.s.bankroll_usd <= self.s.peak_bankroll_usd * (1 - CFG.max_drawdown_pct)
         if not bank_trusted:
             pass                      # untrusted read: neither counts toward nor resets the confirmation
@@ -1683,6 +1787,16 @@ class Risk:
                             same_dir_exposure=same_dir, min_order_usd=sig.market.min_order_size * sig.ask)
         if usd <= 0:
             return 0.0, why
+        if CFG.max_total_exposure_pct > 0:
+            open_cost = sum(p.cost_usd for p in self.s.positions.values())
+            pend_cost = sum(max(0.0, o.size - o.filled) * o.price for k, o in self.s.pending_orders.items()
+                            if k not in self.s.positions)
+            eok, edetail = exposure_cap_verdict(CFG, bank=bank, open_cost=open_cost, pending_cost=pend_cost, new_usd=usd)
+            if not eok:
+                if _EXPO_LOG.get(sig.market.slug) != "cap":     # one log line per market, not every loop
+                    _EXPO_LOG[sig.market.slug] = "cap"
+                    log.info("exposure cap skip %s: %s", sig.market.slug, edetail)
+                return 0.0, "skip:exposure_cap " + edetail
         if sig.book.ask_depth_usd < usd * 2:
             return 0.0, "book too thin for size"
         return round(usd, 2), "ok"
@@ -1692,6 +1806,7 @@ class Risk:
         user's decision, not a strategy outcome, so it leaves consecutive_losses and the post-loss cooldown
         untouched (neither incremented by a manual loss nor reset by a manual win)."""
         self.s.realized_pnl_day += pnl
+        self.s.realized_pnl_week += pnl
         self.s.realized_pnl_total += pnl
         if manual:
             return
@@ -1866,6 +1981,8 @@ class PositionManager:
             old_peak, old_day = self.s.peak_bankroll_usd, self.s.day_start_bankroll_usd
             self.s.peak_bankroll_usd = max(0.0, old_peak + flow)
             self.s.day_start_bankroll_usd = max(0.01, old_day + flow)
+            if self.s.week_start_bankroll_usd > 0:
+                self.s.week_start_bankroll_usd = max(0.01, self.s.week_start_bankroll_usd + flow)
             log.warning("external cash flow %+.2f: peak %.2f -> %.2f, day start %.2f -> %.2f", flow, old_peak,
                         self.s.peak_bankroll_usd, old_day, self.s.day_start_bankroll_usd)
         if self.bank_trusted:
@@ -2391,7 +2508,7 @@ def log_decision(verdict: str, d: dict, extra: str = "") -> None:
     row = {"time": utc_iso(), "mode": "LIVE" if CFG.live else "PAPER", "slug": d.get("slug", ""), "verdict": verdict,
            "secs_left": d.get("secs_left", ""), "side": d.get("side", ""), "p_up": d.get("p_up", ""),
            "bid": d.get("bid", ""), "ask": d.get("ask", ""), "edge": d.get("edge", ""),
-           "ptb_src": d.get("ptb_src", ""), "model": d.get("model", ""), "note": extra}
+           "ptb_src": d.get("ptb_src", ""), "model": d.get("model", ""), "note": extra or d.get("lead", "")}
     append_csv(DECISIONS_CSV, row)
 
 
@@ -2463,6 +2580,7 @@ def main() -> None:
     news = NewsState()
     markets: list[BtcMarket] = []
     last_scan = last_news = 0.0
+    last_snap_ok = now_ts()      # grace period at startup; real fetch happens first thing in the loop
     loops = 0
     entries_this_run = 0
     while not _STOP:
@@ -2473,15 +2591,34 @@ def main() -> None:
         loops += 1
         try:
             risk.roll_day()
+            risk.roll_week()
             if now_ts() - last_news >= CFG.news_refresh_seconds:
-                news = refresh_news()
-                last_news = now_ts()
+                _new_news = refresh_news()
+                if _new_news.ok_sources == 0 and news.ok_sources > 0 and news.fetched_at > 0:
+                    # all feeds failed (flaky network): keep last good news (it still expires via
+                    # news_max_age_seconds) and retry in ~20s instead of waiting a full cycle
+                    log.warning("news refresh got 0 sources; keeping last good news (%.0fs old), retry in 20s",
+                                now_ts() - news.fetched_at)
+                    last_news = now_ts() - max(0.0, CFG.news_refresh_seconds - 20.0)
+                else:
+                    news = _new_news
+                    last_news = now_ts()
             if now_ts() - last_scan >= CFG.scan_seconds:
                 markets = scan_btc_updown_markets()
                 last_scan = now_ts()
                 log.info("scanner: %d live BTC up/down markets: %s", len(markets),
                          ", ".join(f"{m.slug}({m.seconds_left:.0f}s)" for m in markets[:6]))
             snap = fetch_btc_prices()
+            if snap is not None:
+                last_snap_ok = now_ts()
+            feed_stale, feed_detail = stale_feed_verdict(CFG, spot_age=now_ts() - last_snap_ok,
+                                                         scan_age=now_ts() - last_scan)
+            if feed_stale != _STALE_STATE["active"]:       # one line per episode (start and end)
+                _STALE_STATE["active"] = feed_stale
+                if feed_stale:
+                    log.warning("STALE FEED kill switch: new entries paused (%s); exits unaffected", feed_detail)
+                else:
+                    log.info("feed fresh again: new entries resumed")
             # One consistent bankroll: cash + open positions + resolved-unredeemed winners (see compute_bankroll)
             trusted = pm.refresh_bankroll(ex.collateral_balance_usd() if CFG.live else None)
             by_slug = {m.slug: m for m in markets}
@@ -2506,9 +2643,12 @@ def main() -> None:
                     break
                 if now_ts() < m.start_ts:
                     continue   # only windows that are live right now
-                if m.seconds_left > 15 and not state.halted:
+                if m.seconds_left > 15 and not state.halted and not feed_stale:
                     pm.try_arbitrage(m)
                 if m.slug in state.positions or m.slug in state.pending_orders:
+                    continue
+                if feed_stale:
+                    log_decision("skip:stale_feed", {"slug": m.slug}, feed_detail)
                     continue
                 sig, verdict, d = decide(m, snap, news)
                 if sig is None:

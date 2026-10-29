@@ -305,6 +305,30 @@ What the data says:
 - Coinbase price direction matched the Chainlink-settled outcome only **87%** of the time (TWAP
   settlement plus the price gap between feeds). This is why exchange-price models struggle here.
 
+## Risk controls added Oct 2026 (live VPS settings)
+
+These are all optional (0 = off in code); `.env.example` ships the values the live bot uses.
+
+| Setting | Example | What it does |
+|---|---|---|
+| `FAV_MIN_LEAD_USD` | 85 | Cushion filter: only buy the favorite when live BTC spot is at least this many USD through the price to beat. |
+| `MAX_POSITION_PCT` | 0.20 | Max stake per trade as a fraction of bankroll (trades below the 5-share minimum are skipped, not rounded up). |
+| `MAX_TOTAL_EXPOSURE_PCT` | 0.40 | Cap on the combined cost of all open positions. |
+| `STALE_FEED_KILL_SECONDS` | 45 | Stale-feed kill switch: no new entries while market/spot data is older than this. |
+| `DAILY_LOSS_LIMIT_PCT` / `MAX_DRAWDOWN_PCT` | 0.20 / 0.35 | Daily loss and peak drawdown halts. |
+| `WEEKLY_LOSS_LIMIT_PCT` | 0.40 | Weekly loss stop (ISO week, UTC, Monday start). |
+| `MAX_TRADES_PER_DAY` | 50 | Daily trade cap. |
+
+The dashboard's Risk settings panel can edit these (including the weekly limit) and writes them to `.env`.
+
+### Running on a Linux VPS (systemd + watchdog)
+
+`deploy/` holds the systemd units used on the VPS: `polybot.service` (bot), `polydash.service` (dashboard),
+and `polybot-watchdog.service` + `polybot-watchdog.timer` (every 2 min). `deploy/watchdog.sh` restarts
+`polybot` via systemctl only if the service is active but `data/bot.log` has not been written for 5 minutes,
+at most once per 15 minutes, logging to `data/watchdog.log` (`WATCHDOG_DRY_RUN=1` to test). Copy it to the
+bot folder, adjust paths/user in the units, then `sudo systemctl enable --now polybot polydash polybot-watchdog.timer`.
+
 ## Strategy modules (STRATEGY env)
 - `favorite` (default, v2): the early-favorite rule above, using the 15m windows only.
 - `model`: the v1 model with its gates. Kept for research. It lost money in the backtest.

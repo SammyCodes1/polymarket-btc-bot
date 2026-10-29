@@ -85,10 +85,16 @@ EDITABLE: dict[str, dict[str, Any]] = {
                                 label="Max seconds left", help="…and at most this many (15m window = 900 s)."),
     "FAV_EDGE_EST":        dict(type="float", min=-0.05, max=0.10, step=0.005, default=0.015, group="Strategy",
                                 label="Assumed edge over mid", help="Edge assumed for sizing and the after-fee check. Higher = looser."),
+    "FAV_MIN_LEAD_USD":    dict(type="float", min=0.0, max=500.0, step=5.0, default=0.0, group="Strategy",
+                                label="Min BTC lead ($)", help="Skip entries unless BTC is at least this many $ past the strike in the bet's direction. 0 = off. Skips if the strike or a fresh BTC price is missing."),
     "MAX_POSITION_USD":    dict(type="float", min=1.0, max=1000.0, step=0.1, default=10.0, group="Risk",
                                 label="Max $ per trade", help="Hard cap on each trade's cost."),
     "MAX_TRADES_PER_DAY":  dict(type="int", min=0, max=200, step=1, default=20, group="Risk",
                                 label="Max trades per day", help="Entries per UTC day (0 blocks all entries)."),
+    "MAX_TOTAL_EXPOSURE_PCT": dict(type="float", min=0.0, max=1.0, step=0.05, default=0.0, group="Risk",
+                                label="Max total exposure", help="Skip a new entry if open positions + resting orders + the new stake would exceed this share of the bankroll. 0 = off. If the 5-share minimum order alone exceeds it, the entry is skipped."),
+    "STALE_FEED_KILL_SECONDS": dict(type="int", min=0, max=600, step=5, default=0, group="Risk",
+                                label="Stale-feed kill (s)", help="Pause NEW entries when the BTC price feed or market scan is older than this many seconds; resumes automatically. Exits are not affected. 0 = off."),
     "MAX_OPEN_POSITIONS":  dict(type="int", min=1, max=10, step=1, default=2, group="Risk",
                                 label="Max open positions", help="Concurrent positions."),
     "TAKE_PROFIT_MIN_BID": dict(type="float", min=0.50, max=1.00, step=0.01, default=0.97, group="Exits",
@@ -97,6 +103,8 @@ EDITABLE: dict[str, dict[str, Any]] = {
                                 label="Stop loss", help="Fraction of cost lost before selling (0.60 = −60%)."),
     "DAILY_LOSS_LIMIT_PCT": dict(type="float", min=0.01, max=1.00, step=0.01, default=0.05, group="Risk",
                                  label="Daily loss limit", help="Halt for the UTC day after losing this fraction of the day's start bankroll."),
+    "WEEKLY_LOSS_LIMIT_PCT": dict(type="float", min=0.0, max=1.00, step=0.01, default=0.0, group="Risk",
+                                 label="Weekly loss limit", help="Halt new entries for the rest of the UTC week (Mon-Sun) after losing this fraction of the week's start bankroll. 0 = off."),
     "MAX_DRAWDOWN_PCT":    dict(type="float", min=0.01, max=1.00, step=0.01, default=0.10, group="Risk",
                                 label="Max drawdown", help="Halt when bankroll falls this far below its peak."),
     "DRY_RUN":             dict(type="bool", default=True, group="Mode",
@@ -533,6 +541,29 @@ def stop_bot_blocking(grace: float = STOP_GRACE_SECONDS) -> dict:
     return {"ok": True, "was_running": True, "forced": forced}
 
 
+
+# --- VPS patch: bot is managed by systemd (polybot.service); never spawn a second copy ---
+def start_bot() -> dict:
+    with _proc_lock:
+        if find_bot_processes():
+            raise HTTPException(409, "The bot is already running.")
+        if kill_file_present():
+            raise HTTPException(409, "A KILL file is present. Use 'Clear halt' first.")
+        (data_dir() / "STOP").unlink(missing_ok=True)
+        subprocess.run(["sudo", "-n", "systemctl", "start", "polybot"], check=False)
+    time.sleep(2)
+    if not find_bot_processes():
+        raise HTTPException(500, "bot did not start; check data/bot.log")
+    return {"ok": True}
+
+
+def stop_bot_blocking(grace: float = STOP_GRACE_SECONDS) -> dict:
+    was = bool(find_bot_processes())
+    subprocess.run(["sudo", "-n", "systemctl", "stop", "polybot"], check=False, timeout=60)
+    (data_dir() / "STOP").unlink(missing_ok=True)
+    return {"ok": True, "was_running": was, "forced": False}
+
+
 def _run_op(name: str, fn) -> None:
     if _op_state["op"]:
         raise HTTPException(409, f"Busy: {_op_state['op']} in progress.")
@@ -794,14 +825,6 @@ def api_state():
     return {"available": True, **st}
 
 
-@app.get("/api/orders")
-def api_orders():
-    """Resting limit entries (ENTRY_MODE=limit) from state.json."""
-    st = read_json(data_dir() / "state.json") or {}
-    orders = st.get("pending_orders") or {}
-    return {"orders": [{k: v for k, v in o.items() if k != "seen_tx"} for o in orders.values() if isinstance(o, dict)]}
-
-
 @app.get("/api/positions")
 def api_positions():
     st = read_json(data_dir() / "state.json") or {}
@@ -852,6 +875,56 @@ def api_decisions(limit: int = 60, interesting: bool = True):
     for r in read_csv_tail(path, 4000):
         counts[r.get("verdict", "?")] = counts.get(r.get("verdict", "?"), 0) + 1
     return {"decisions": list(reversed(out[-limit:])), "verdict_counts": counts}
+
+
+_SERIES_SLUG_RE = re.compile(r"^btc-updown-(5m|15m)-(\d{9,12})$")
+
+
+@app.get("/api/trade-series")
+def api_trade_series(slug: str, side: str):
+    """Read-only: recorded price points of one market, expressed as the price of `side` (used by the share card).
+
+    Source is data/decisions.csv: when a row's favorite side is the requested side we use its best bid; when it is
+    the opposite side we use 1 - its ask (the equivalent bid of the requested side in a binary market).
+    """
+    m = _SERIES_SLUG_RE.match(slug or "")
+    side = (side or "").upper()
+    if not m or side not in ("UP", "DOWN"):
+        raise HTTPException(status_code=400, detail="bad slug or side")
+    start_ts = int(m.group(2))
+    end_ts = start_ts + (900 if m.group(1) == "15m" else 300)
+    path = data_dir() / "decisions.csv"
+    header = csv_header(path)
+    pts: list[list] = []
+    if header:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+                lines = (ln for ln in f if slug in ln)
+                for rec in csv.reader(lines):
+                    row = {h: (rec[i] if i < len(rec) else "") for i, h in enumerate(header)}
+                    if row.get("slug") != slug:
+                        continue
+                    rs = (row.get("side") or "").upper()
+                    if rs == side:
+                        v, kind = _f(row.get("bid")), "own"
+                    elif rs in ("UP", "DOWN"):
+                        a = _f(row.get("ask"))
+                        v, kind = (None if a is None else 1.0 - a), "inv"
+                    else:
+                        continue
+                    if v is None or not (0.0 < v <= 1.0):
+                        continue
+                    try:
+                        t = datetime.fromisoformat(row["time"]).timestamp()
+                    except (ValueError, KeyError):
+                        continue
+                    if pts and abs(pts[-1][0] - t) < 0.5:
+                        continue
+                    pts.append([round(t, 1), round(v, 4), kind])
+        except FileNotFoundError:
+            pass
+    pts.sort(key=lambda p: p[0])
+    return {"slug": slug, "side": side, "start_ts": start_ts, "end_ts": end_ts, "points": pts[-800:], "source": "decisions.csv"}
 
 
 @app.get("/api/log")
@@ -1191,6 +1264,8 @@ def main() -> None:
         raise SystemExit("Refusing to bind to a non-local address without DASHBOARD_TOKEN set.")
     for h in ("127.0.0.1", "localhost", args.host):
         _ALLOWED_HOSTS.add(f"{h}:{args.port}".lower())
+    for h in ("polybot", "polybot.taild65c41.ts.net", "100.75.180.78"):   # Tailscale (tailnet-only)
+        _ALLOWED_HOSTS.update({h, f"{h}:{args.port}"})
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         _ALLOWED_HOSTS.clear()     # remote use: token is the guard
     url = f"http://127.0.0.1:{args.port}/" if args.host in ("127.0.0.1", "0.0.0.0", "localhost") else f"http://{args.host}:{args.port}/"
