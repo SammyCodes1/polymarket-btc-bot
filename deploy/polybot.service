@@ -1,0 +1,11 @@
+[Unit]
+Description=Polymarket BTC bot
+After=network-online.target
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-btc-bot
+ExecStart=/home/ubuntu/polymarket-btc-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Polymarket bot dashboard (local only)
+After=network-online.target
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-btc-bot
+ExecStart=/home/ubuntu/polymarket-btc-bot/.venv/bin/python dashboard/server.py
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

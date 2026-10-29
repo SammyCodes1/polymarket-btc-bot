@@ -1,0 +1,6 @@
+[Unit]
+Description=polybot watchdog (restart if bot.log goes stale)
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/polymarket-btc-bot/watchdog.sh
